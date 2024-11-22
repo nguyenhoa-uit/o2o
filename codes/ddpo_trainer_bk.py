@@ -13,45 +13,28 @@
 # limitations under the License.
 
 import os
-import warnings
+import textwrap
 from collections import defaultdict
 from concurrent import futures
-from typing import Any, Callable, Optional, Tuple
+from typing import Any, Callable, List, Optional, Tuple, Union
 from warnings import warn
-import torch
-from torch.utils.data import Dataset, DataLoader
 
+import torch
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import ProjectConfiguration, set_seed
-from huggingface_hub import whoami
+from transformers import is_wandb_available
 
-from codes.modeling_sd_baseee import DDPOStableDiffusionPipeline
-from codes.base import BaseTrainer
-from codes.ddpo_config import DDPOConfig
-from codes.utils import PerPromptStatTracker
+from ..models import DDPOStableDiffusionPipeline
+from . import BaseTrainer, DDPOConfig
+from .utils import PerPromptStatTracker, generate_model_card
+
+
+if is_wandb_available():
+    import wandb
 
 
 logger = get_logger(__name__)
-
-
-MODEL_CARD_TEMPLATE = """---
-license: apache-2.0
-tags:
-- trl
-- ddpo
-- diffusers
-- reinforcement-learning
-- text-to-image
-- stable-diffusion
----
-
-# {model_name}
-
-This is a diffusion model that has been fine-tuned with reinforcement learning to
- guide the model outputs according to a value, function, or human feedback. The model can be used for image generation conditioned with text.
-
-"""
 
 
 class DDPOTrainer(BaseTrainer):
@@ -73,9 +56,6 @@ class DDPOTrainer(BaseTrainer):
 
     def __init__(
         self,
-
-        # Thêm
-        dataloader: DataLoader,
         config: DDPOConfig,
         reward_function: Callable[[torch.Tensor, Tuple[str], Tuple[Any]], torch.Tensor],
         prompt_function: Callable[[], Tuple[str, Any]],
@@ -89,7 +69,6 @@ class DDPOTrainer(BaseTrainer):
         self.reward_fn = reward_function
         self.config = config
         self.image_samples_callback = image_samples_hook
-        self.dataloader=dataloader
 
         accelerator_project_config = ProjectConfiguration(**self.config.project_kwargs)
 
@@ -168,6 +147,7 @@ class DDPOTrainer(BaseTrainer):
         self.sd_pipeline.unet.to(self.accelerator.device, dtype=inference_dtype)
 
         trainable_layers = self.sd_pipeline.get_trainable_layers()
+
         self.accelerator.register_save_state_pre_hook(self._save_model_hook)
         self.accelerator.register_load_state_pre_hook(self._load_model_hook)
 
@@ -215,67 +195,62 @@ class DDPOTrainer(BaseTrainer):
             self.first_epoch = int(config.resume_from.split("_")[-1]) + 1
         else:
             self.first_epoch = 0
-        self.log_prompt=None
 
+    def compute_rewards(self, prompt_image_pairs, is_async=False):
+        if not is_async:
+            rewards = []
+            for images, prompts, prompt_metadata in prompt_image_pairs:
+                reward, reward_metadata = self.reward_fn(images, prompts, prompt_metadata)
+                rewards.append(
+                    (
+                        torch.as_tensor(reward, device=self.accelerator.device),
+                        reward_metadata,
+                    )
+                )
+        else:
+            rewards = self.executor.map(lambda x: self.reward_fn(*x), prompt_image_pairs)
+            rewards = [
+                (torch.as_tensor(reward.result(), device=self.accelerator.device), reward_metadata.result())
+                for reward, reward_metadata in rewards
+            ]
 
-    def train(self, epochs: Optional[int] = None):
-        """
-        Train the model for a given number of epochs
-        """
-        global_step = self.config.global_step
-        if epochs is None:
-            epochs = self.config.num_epochs
-        for epoch in range(self.first_epoch, epochs):
-
-            print("\n")
-            print("------------------------------------------------------------------------")
-            print(f"Starting epoch {epoch} ----------------------------------------------- \n")
-            global_step = self.step(epoch, global_step)
+        return zip(*rewards)
 
     def step(self, epoch: int, global_step: int):
+        """
+        Perform a single step of training.
 
-        samples, prompt_image_data = self._generate_samples_with_mode(
+        Args:
+            epoch (int): The current epoch.
+            global_step (int): The current global step.
+
+        Side Effects:
+            - Model weights are updated
+            - Logs the statistics to the accelerator trackers.
+            - If `self.image_samples_callback` is not None, it will be called with the prompt_image_pairs, global_step, and the accelerator tracker.
+
+        Returns:
+            global_step (int): The updated global step.
+
+        """
+        samples, prompt_image_data = self._generate_samples(
             iterations=self.config.sample_num_batches_per_epoch,
             batch_size=self.config.sample_batch_size,
-            mode=self.config.train_mode,
         )
 
-        if self.config.show_image_log:
-            prompt_image_data_log=prompt_image_data[-1:]
-            # if self.config.train_mode!='reward':
-            prompt_image_data=prompt_image_data[:-1]
-            samples=samples[:-1]
+        # collate samples into dict where each entry has shape (num_batches_per_epoch * sample.batch_size, ...)
         samples = {k: torch.cat([s[k] for s in samples]) for k in samples[0].keys()}
-
-        # rewards, rewards_metadata = self.compute_rewards(
-        #     prompt_image_data, is_async=self.config.async_reward_computation
-        # )
-
-        rewards=samples['rewards']
-
-        print(rewards)
-
-        rewards_metadata=[{} for i in range(rewards.shape[0])]
+        rewards, rewards_metadata = self.compute_rewards(
+            prompt_image_data, is_async=self.config.async_reward_computation
+        )
 
         for i, image_data in enumerate(prompt_image_data):
             image_data.extend([rewards[i], rewards_metadata[i]])
 
-
         if self.image_samples_callback is not None:
             self.image_samples_callback(prompt_image_data, global_step, self.accelerator.trackers[0])
 
-        # if self.config.train_mode=="contrastive" and self.config.show_image_log:
-        if self.config.show_image_log:
-            for i, image_data in enumerate(prompt_image_data_log):
-                image_data.extend([rewards[-1], {}])
-
-        if self.config.show_image_log and self.image_samples_callback is not None:
-            self.image_samples_callback(prompt_image_data_log, global_step, self.accelerator.trackers[0])
-
-        # drop last item (sample_image)
-        # rewards=reward[:-1]
-        # rewards_metadata=rewards_metadata[:-1]
-
+        rewards = torch.cat(rewards)
         rewards = self.accelerator.gather(rewards).cpu().numpy()
 
         self.accelerator.log(
@@ -284,7 +259,6 @@ class DDPOTrainer(BaseTrainer):
                 "epoch": epoch,
                 "reward_mean": rewards.mean(),
                 "reward_std": rewards.std(),
-                "test": 20+epoch,
             },
             step=global_step,
         )
@@ -309,12 +283,9 @@ class DDPOTrainer(BaseTrainer):
         total_batch_size, num_timesteps = samples["timesteps"].shape
 
         for inner_epoch in range(self.config.train_num_inner_epochs):
-            print(f'------****************Inner epoch {inner_epoch}')
-
             # shuffle samples along batch dimension
             perm = torch.randperm(total_batch_size, device=self.accelerator.device)
-            
-            samples = {k: v.to(self.accelerator.device)[perm] for k, v in samples.items()}
+            samples = {k: v[perm] for k, v in samples.items()}
 
             # shuffle along time dimension independently for each sample
             # still trying to understand the code below
@@ -339,296 +310,17 @@ class DDPOTrainer(BaseTrainer):
             samples_batched = [dict(zip(original_keys, row_values)) for row_values in transposed_values]
 
             self.sd_pipeline.unet.train()
-            global_step = self._train_batched_samples(inner_epoch, epoch, global_step, 
-            samples_batched)
+            global_step = self._train_batched_samples(inner_epoch, epoch, global_step, samples_batched)
             # ensure optimization step at the end of the inner epoch
             if not self.accelerator.sync_gradients:
                 raise ValueError(
                     "Optimization step should have been performed by this point. Please check calculated gradient accumulation settings."
                 )
 
+        if epoch != 0 and epoch % self.config.save_freq == 0 and self.accelerator.is_main_process:
+            self.accelerator.save_state()
 
-        # Bị lỗi    
-        try:
-            if epoch != 0 and epoch % self.config.save_freq == 0 and self.accelerator.is_main_process:
-                print(f"********************** save_state {epoch}")
-                self.accelerator.save_state()
-        except ValueError:
-            print('checkpoint_0 name already exists. ')
         return global_step
-
-    def _generate_samples_with_mode(self, iterations, batch_size,mode):
-        if mode=="contrastive":
-            # if batch_size<2:
-            #     raise Exception("Batch size should be larger than 1")
-
-            onpolicy_batch_size=int(batch_size/2)
-            offpolicy_batch_size=batch_size-onpolicy_batch_size
-            off_samples, off_prompt_image_pairs,prompts_offline=self._generate_samples_offline(
-            iterations=iterations,
-            batch_size=offpolicy_batch_size,
-        ) 
-                        
-            if self.log_prompt==None:
-               self.log_prompt=prompts_offline[:1] 
-
-            on_samples, on_prompt_image_pairs= self._generate_samples_onpolicy(
-            iterations=iterations,
-            batch_size=onpolicy_batch_size,
-            prompts=prompts_offline[:onpolicy_batch_size],
-            log_prompt=self.log_prompt,
-            is_logging=self.config.show_image_log,
-            ) 
-            off_samples.extend(on_samples)
-            off_prompt_image_pairs.extend(on_prompt_image_pairs)
-
-            return off_samples,off_prompt_image_pairs
-        
-        elif mode=="offpolicy":
-            # if batch_size<2:
-            #     raise Exception("Batch size should be larger than 1")
-
-            off_samples, off_prompt_image_pairs,prompts_offline=self._generate_samples_offline(
-            iterations=iterations,
-            batch_size=batch_size,
-        ) 
-            
-            if self.log_prompt==None:
-               self.log_prompt=prompts_offline[:1] 
-
-
-            on_samples, on_prompt_image_pairs= self._generate_samples_onpolicy(
-            iterations=iterations,
-            batch_size=0,
-            prompts=[],
-            log_prompt=self.log_prompt,
-            is_logging=self.config.show_image_log,
-            ) 
-            off_samples.extend(on_samples)
-            off_prompt_image_pairs.extend(on_prompt_image_pairs)
-
-            return off_samples,off_prompt_image_pairs
-
-        #     off_samples, off_prompt_image_pairs,prompts_offline= self._generate_samples_offline(
-        #     iterations=iterations,
-        #     batch_size=batch_size,
-        # ) 
-            
-        #     return off_samples, off_prompt_image_pairs
-
-        else:
-            on_samples, on_prompt_image_pairs= self._generate_samples_onpolicy(
-            iterations=iterations,
-            batch_size=batch_size,
-            prompts=["a beautiful Asian girl" for i in range(batch_size)],
-            log_prompt=["a beautiful Asian girl"],
-            is_logging=True,
-            ) 
-            return on_samples, on_prompt_image_pairs
-            # raise Exception("Mode should be reward or constractive")
-        
-            
-    def _generate_samples_onpolicy(self, iterations, batch_size,prompts,log_prompt,is_logging):
-        samples = []
-        prompt_image_pairs = []
-
-
-        # if batch_size==0:
-        #     return samples, prompt_image_pairs
-        if is_logging:
-            batch_size+=1
-            prompts=list(prompts)
-            prompts.append(log_prompt[0])
-            prompts=tuple(prompts)
-        self.sd_pipeline.unet.eval()
-
-        sample_neg_prompt_embeds = self.neg_prompt_embed.repeat(batch_size, 1, 1)
-
-        for _ in range(iterations):
-            prompt_metadata = [{} for _ in range(batch_size)]
-
-            prompt_ids = self.sd_pipeline.tokenizer(
-                prompts,
-                return_tensors="pt",
-                padding="max_length",
-                truncation=True,
-                max_length=self.sd_pipeline.tokenizer.model_max_length,
-            ).input_ids.to(self.accelerator.device)
-            prompt_embeds = self.sd_pipeline.text_encoder(prompt_ids)[0]
-
-            with self.autocast():
-                sd_output = self.sd_pipeline(
-                    prompt_embeds=prompt_embeds,
-                    negative_prompt_embeds=sample_neg_prompt_embeds,
-                    num_inference_steps=self.config.sample_num_steps,
-                    guidance_scale=self.config.sample_guidance_scale,
-                    eta=self.config.sample_eta,
-                    output_type="pt",
-                    height=self.config.resolution,width=self.config.resolution,
-                    # show_image_log=self.config.show_image_log,
-                )
-                if self.config.show_image_log:
-                    images = sd_output.images[:-1]
-                    latents = [i[:-1] for i in sd_output.latents]
-                    log_probs = [i[:-1] for i in sd_output.log_probs]
-
-                    images_log = sd_output.images[-1:]
-                    latents_log = [i[:-1] for i in sd_output.latents]
-                    log_probs_log = [i[:-1] for i in sd_output.log_probs]
-                else:
-                    images = sd_output.images
-                    latents=sd_output.latents
-                    log_probs=sd_output.log_probs
-
-            latents = torch.stack(latents, dim=1)  # (batch_size, num_steps + 1, ...)
-            log_probs = torch.stack(log_probs, dim=1)  # (batch_size, num_steps, 1)
-            timesteps = self.sd_pipeline.scheduler.timesteps.repeat(batch_size, 1)  # (batch_size, num_steps)
-            rewards=[self.config.negative_reward for _ in range(batch_size)]
-            rewards=torch.as_tensor(rewards).unsqueeze(dim=1).repeat(1,self.config.sample_num_steps)
-
-            if self.config.show_image_log:
-
-                latents_log = torch.stack(latents_log, dim=1)  # (batch_size, num_steps + 1, ...)
-                log_probs_log = torch.stack(log_probs_log, dim=1)  # (batch_size, num_steps, 1)
-                timesteps_log = self.sd_pipeline.scheduler.timesteps.repeat(1, 1)  # (batch_size, num_steps)
-                rewards_log=[self.config.negative_reward for _ in range(1)]
-                rewards_log=torch.as_tensor(rewards_log).unsqueeze(dim=1).repeat(1,self.config.sample_num_steps)
-
-            samples.append(
-                {
-                    "prompt_ids": prompt_ids,
-                    "prompt_embeds": prompt_embeds,
-                    "timesteps": timesteps,
-                    "latents": latents[:, :-1],  # each entry is the latent before timestep t
-                    "next_latents": latents[:, 1:],  # each entry is the latent after timestep t
-                    "log_probs": log_probs,
-                    "rewards": rewards,
-                    "negative_prompt_embeds": sample_neg_prompt_embeds,
-                }
-            )
-
-            prompt_image_pairs.append([images, prompts, prompt_metadata])
-
-            if self.config.show_image_log:
-                samples.append(
-                    {
-                        "prompt_ids": prompt_ids[-1:],
-                        "prompt_embeds": prompt_embeds[-1:],
-                        "timesteps": timesteps_log,
-                        "latents": latents_log[:, :-1],  # each entry is the latent before timestep t
-                        "next_latents": latents_log[:, 1:],  # each entry is the latent after timestep t
-                        "log_probs": log_probs_log,
-                        "rewards": rewards_log,
-                        "negative_prompt_embeds": sample_neg_prompt_embeds[-1:],
-                    }
-                )
-                prompt_image_pairs.append([images_log, prompts[-1:], prompt_metadata[-1:]])
-        return samples, prompt_image_pairs
-
-    def _generate_samples_offline(self, iterations, batch_size):
-        """
-        Generate samples from the model
-
-        Args:
-            iterations (int): Number of iterations to generate samples for
-            batch_size (int): Batch size to use for sampling
-
-        Returns:
-            samples (List[Dict[str, torch.Tensor]]), prompt_image_pairs (List[List[Any]])
-        """
-
-        samples = []
-        prompt_image_pairs = []
-        if batch_size==0:
-            return samples, prompt_image_pairs,[]
-        self.sd_pipeline.unet.eval()
-
-        sample_neg_prompt_embeds = self.neg_prompt_embed.repeat(batch_size, 1, 1)
-   
-        
-
-        for _ in range(iterations):
-            n=next(iter(self.dataloader))
-            images_offline,scores_offline,prompts_offline,prompt_metadata_offline,img_name=n[0],n[1],n[2],n[3],n[4]
-            prompts=prompts_offline
-            prompt_metadata=prompt_metadata_offline
-
-            prompt_ids = self.sd_pipeline.tokenizer(
-                prompts,
-                return_tensors="pt",
-                padding="max_length",
-                truncation=True,
-                max_length=self.sd_pipeline.tokenizer.model_max_length,
-            ).input_ids.to(self.accelerator.device)
-            prompt_embeds = self.sd_pipeline.text_encoder(prompt_ids)[0]
-
-            with self.autocast():
-
-                sd_output = self.sd_pipeline.call_offline(
-                    images_offline=images_offline,
-                    prompt_embeds=prompt_embeds,
-                    negative_prompt_embeds=sample_neg_prompt_embeds,
-                    num_inference_steps=self.config.sample_num_steps,
-                    guidance_scale=self.config.sample_guidance_scale,
-                    eta=self.config.sample_eta,
-                    output_type="pt",
-                )
-
-                images = sd_output.images
-                latents = sd_output.latents
-                log_probs = sd_output.log_probs
-
-            latents = torch.stack(latents, dim=1)  # (batch_size, num_steps + 1, ...)
-            log_probs = torch.stack(log_probs, dim=1)  # (batch_size, num_steps, 1)
-            timesteps = self.sd_pipeline.scheduler.timesteps.repeat(batch_size, 1)  # (batch_size, num_steps)
-            scores_offline=torch.as_tensor(scores_offline).unsqueeze(dim=1).repeat(1,self.config.sample_num_steps)
-            
-            print(f'******  ddpotrainer timesteps shape {timesteps.shape}')
-            print(f'*******  log_probs shape {log_probs.shape}')
-           
-           
-            # latents phải từ noise đến ảnh
-            samples.append(
-                {
-                    "prompt_ids": prompt_ids,
-                    "prompt_embeds": prompt_embeds,
-                    "timesteps": timesteps,
-                    "latents": latents[:, :-1],  # each entry is the latent before timestep t
-                    "next_latents": latents[:, 1:],  # each entry is the latent after timestep t
-                    "log_probs": log_probs,
-                    "negative_prompt_embeds": sample_neg_prompt_embeds,
-                    "rewards": scores_offline,
-                }
-            )
-            print(f'*********** img_name {img_name}')
-            print(f'*********** samples[-1]["rewards"][:][:2]{samples[-1]["rewards"][:][:2]}')
-            print(f'*********** prompts_offline {prompts_offline}')
-
-
-            prompt_image_pairs.append([images, prompts, prompt_metadata])
-
-        return samples, prompt_image_pairs,prompts_offline
-    
-
-    def compute_rewards(self, prompt_image_pairs, is_async=False):
-        if not is_async:
-            rewards = []
-            for images, prompts, prompt_metadata in prompt_image_pairs:
-                reward, reward_metadata = self.reward_fn(images, prompts, prompt_metadata)
-                rewards.append(
-                    (
-                        torch.as_tensor(reward, device=self.accelerator.device),
-                        reward_metadata,
-                    )
-                )
-        else:
-            rewards = self.executor.map(lambda x: self.reward_fn(*x), prompt_image_pairs)
-            rewards = [
-                (torch.as_tensor(reward.result(), device=self.accelerator.device), reward_metadata.result())
-                for reward, reward_metadata in rewards
-            ]
-
-        return zip(*rewards)
 
     def calculate_loss(self, latents, timesteps, next_latents, log_probs, advantages, embeds):
         """
@@ -736,8 +428,6 @@ class DDPOTrainer(BaseTrainer):
         self.sd_pipeline.load_checkpoint(models, input_dir)
         models.pop()  # ensures that accelerate doesn't try to handle loading of the model
 
-  
-    
     def _generate_samples(self, iterations, batch_size):
         """
         Generate samples from the model
@@ -775,10 +465,7 @@ class DDPOTrainer(BaseTrainer):
                     guidance_scale=self.config.sample_guidance_scale,
                     eta=self.config.sample_eta,
                     output_type="pt",
-                    height=512,width=512,
                 )
-
-              
 
                 images = sd_output.images
                 latents = sd_output.latents
@@ -891,27 +578,73 @@ class DDPOTrainer(BaseTrainer):
             )
         return True, ""
 
-    def create_model_card(self, path: str, model_name: Optional[str] = "TRL DDPO Model") -> None:
-        """Creates and saves a model card for a TRL model.
-
-        Args:
-            path (`str`): The path to save the model card to.
-            model_name (`str`, *optional*): The name of the model, defaults to `TRL DDPO Model`.
+    def train(self, epochs: Optional[int] = None):
         """
-        try:
-            user = whoami()["name"]
-        # handle the offline case
-        except Exception:
-            warnings.warn("Cannot retrieve user information assuming you are running in offline mode.")
-            return
-
-        if not os.path.exists(path):
-            os.makedirs(path)
-
-        model_card_content = MODEL_CARD_TEMPLATE.format(model_name=model_name, model_id=f"{user}/{path}")
-        with open(os.path.join(path, "README.md"), "w", encoding="utf-8") as f:
-            f.write(model_card_content)
+        Train the model for a given number of epochs
+        """
+        global_step = 0
+        if epochs is None:
+            epochs = self.config.num_epochs
+        for epoch in range(self.first_epoch, epochs):
+            global_step = self.step(epoch, global_step)
 
     def _save_pretrained(self, save_directory):
         self.sd_pipeline.save_pretrained(save_directory)
-        self.create_model_card(save_directory)
+        self.create_model_card()
+
+    def create_model_card(
+        self,
+        model_name: Optional[str] = None,
+        dataset_name: Optional[str] = None,
+        tags: Union[str, List[str], None] = None,
+    ):
+        """
+        Creates a draft of a model card using the information available to the `Trainer`.
+
+        Args:
+            model_name (`str`, *optional*, defaults to `None`):
+                The name of the model.
+            dataset_name (`str`, *optional*, defaults to `None`):
+                The name of the dataset used for training.
+            tags (`str`, `List[str]` or `None`, *optional*, defaults to `None`):
+                Tags to be associated with the model card.
+        """
+        if not self.is_world_process_zero():
+            return
+
+        if hasattr(self.model.config, "_name_or_path") and not os.path.isdir(self.model.config._name_or_path):
+            base_model = self.model.config._name_or_path
+        else:
+            base_model = None
+
+        tags = tags or []
+        if isinstance(tags, str):
+            tags = [tags]
+
+        if hasattr(self.model.config, "unsloth_version"):
+            tags.append("unsloth")
+
+        citation = textwrap.dedent("""\
+        @inproceedings{black2024training,
+            title        = {{Training Diffusion Models with Reinforcement Learning}},
+            author       = {Kevin Black and Michael Janner and Yilun Du and Ilya Kostrikov and Sergey Levine},
+            year         = 2024,
+            booktitle    = {The Twelfth International Conference on Learning Representations, {ICLR} 2024, Vienna, Austria, May 7-11, 2024},
+            publisher    = {OpenReview.net},
+            url          = {https://openreview.net/forum?id=YCWjhGrJFD},
+        }""")
+
+        model_card = generate_model_card(
+            base_model=base_model,
+            model_name=model_name,
+            hub_model_id=self.hub_model_id,
+            dataset_name=dataset_name,
+            tags=tags,
+            wandb_url=wandb.run.get_url() if is_wandb_available() and wandb.run is not None else None,
+            trainer_name="DDPO",
+            trainer_citation=citation,
+            paper_title="Training Diffusion Models with Reinforcement Learning",
+            paper_id="2305.13301",
+        )
+
+        model_card.save(os.path.join(self.args.output_dir, "README.md"))

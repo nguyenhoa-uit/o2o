@@ -416,7 +416,6 @@ def pipeline_step(
     height = height or self.unet.config.sample_size * self.vae_scale_factor
     width = width or self.unet.config.sample_size * self.vae_scale_factor
 
-
     # 1. Check inputs. Raise error if not correct
 
     self.check_inputs(
@@ -536,8 +535,6 @@ def pipeline_step(
                 if callback is not None and i % callback_steps == 0:
                     callback(i, t, latents)
 
-    print(f"  final latents {latents}" )
-
     if not output_type == "latent":
         image = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False)[0]
         image, has_nsfw_concept = self.run_safety_checker(image, device, prompt_embeds.dtype)
@@ -545,20 +542,14 @@ def pipeline_step(
         image = latents
         has_nsfw_concept = None
 
-    print(f" image  {image}" )
-
-    l1= get_latents_from_image(self,image,device)
-    print(l1)
     if has_nsfw_concept is None:
         do_denormalize = [True] * image.shape[0]
+
     else:
         do_denormalize = [not has_nsfw for has_nsfw in has_nsfw_concept]
 
+
     image = self.image_processor.postprocess(image, output_type=output_type, do_denormalize=do_denormalize)
-    print(f" final image {image}" )
-
-
-
 
     # Offload last model to CPU
     if hasattr(self, "final_offload_hook") and self.final_offload_hook is not None:
@@ -1115,11 +1106,6 @@ def pipeline_step_with_grad(
 
     return DDPOPipelineOutput(image, all_latents, all_log_probs)
 
-
-def get_latents_from_image(self,image,device):
-     latents=self.vae.encode(image.to(device,self.dtype)).latent_dist.sample() * self.vae.config.scaling_factor
-     return latents
-
 @torch.no_grad()
 def pipeline_step_offline(
     self,
@@ -1200,18 +1186,12 @@ def pipeline_step_offline(
     # 5. Prepare latent variables
     num_channels_latents = self.unet.config.in_channels
 
-    print(f"image before preprocess {images_offline[-1]}")
+    images_offline=[images_offline[i].to(device,self.dtype).unsqueeze(0) for i in range(len(images_offline))]
 
-
-    # images_offline=[images_offline[i].to(device,self.dtype).unsqueeze(0) for i in range(len(images_offline))]
-    images_offline=[self.image_processor.preprocess(item.to(device,self.dtype),height=height,width=width,resize_mode='crop') for item in images_offline]
-
-    print(f"image after preprocess {images_offline[-1]}")
 
     # Encode the image into latent space using VAE
-    latents_batch = [self.vae.encode(item).latent_dist.sample() * self.vae.config.scaling_factor for item in images_offline]
+    latents_batch = [self.vae.encode(i).latent_dist.sample() * self.vae.config.scaling_factor for i in images_offline]
 
-    print(f"latents after encode {latents_batch[-1]}")
 
     latents_noise_list=[torch.cat(latents_batch,dim=0).to(device,self.dtype)]
 
@@ -1249,6 +1229,11 @@ def pipeline_step_offline(
                 return_dict=False,
             )[0]
 
+            if i==int(num_inference_steps/2):
+                print(f"i  offline = {i} \n")
+                print(f"latents   = {latents[0][0]} \n")
+
+                print(f"noise pred = {noise_pred[0][0]} \n")
 
             # perform guidance
             if do_classifier_free_guidance:
@@ -1284,7 +1269,6 @@ def pipeline_step_offline(
                 progress_bar.update()
                 if callback is not None and i % callback_steps == 0:
                     callback(i, t, latents)
-    print(f" offline final latents {latents}" )
 
     if not output_type == "latent":
         image = self.vae.decode(latents.to(device) / self.vae.config.scaling_factor, return_dict=False)[0]
@@ -1294,8 +1278,7 @@ def pipeline_step_offline(
         has_nsfw_concept = None
 
 
-    print(f" image after decode {image}" )
-
+ 
     if has_nsfw_concept is None:
         do_denormalize = [True] * image.shape[0]
     else:
@@ -1306,7 +1289,6 @@ def pipeline_step_offline(
     # Offload last model to CPU
     if hasattr(self, "final_offload_hook") and self.final_offload_hook is not None:
         self.final_offload_hook.offload()
-    print(f" final image {image}" )
 
     print(f"all_log_probs_offline = {all_log_probs_offline} \n")
 

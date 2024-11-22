@@ -30,81 +30,95 @@ class DDPOConfig:
     """Keyword arguments for the accelerator project config (e.g. `logging_dir`)"""
     logdir: str = "logs"
     """Top-level logging directory for checkpoint saving."""
-    tracker_project_name: str = "stable_diffusion_training"
-    tracker_project_name: str = ""
+    save_freq: int = 10
+    """Number of epochs between saving model checkpoints."""
+    num_checkpoint_limit: int = 10
+    """Number of checkpoints to keep before overwriting old ones."""
+    # tracker_project_name: str = "stable_diffusion_training"
+    tracker_project_name: str = "Dev"
     """Name of project to use for tracking"""
 
 
-    
 
-    seed: int = 6789
+
+
+    train_learning_rate: float = 3e-4  
+    # train_learning_rate: float = 1e-4
+    """Learning rate."""
+    seed: int = 6789  
     """Seed value for random generations"""
-
-    show_image_log: bool=False
-    # """ Show sample image in log tracker (wandb)"""
-
+    global_step: int=0
+    """Global step, using with checkpoint save folder"""
+    high_reward: float=100.00
+    """Reward for a sample picture from dataset """
+    low_reward: float=50.00
+    """Reward for a generated picture from model """
 
 
     resolution:int =512
     "Image square size"
-
-    global_step: int=4
-    """Global step, using with checkpoint save folder"""
-
-    train_mode: str = "contrastive"
-    """ offpolicy or contrastive or other. Train mode"""
-
-
-    positive_reward: int=100
-    """Reward for a sample picture from dataset """
-    negative_reward: int=50
-    """Reward for a generated picture from model """
-    data_folder: str = './inputs/data_onpolicy/'
-    """Top-level logging directory for checkpoint saving."""
-
-    # hyperparameters
-    num_epochs: int = 5
-    sample_num_steps: int = 50
-    """Number of sampler inference steps."""
-    train_batch_size: int = 1
-    """Batch size (per GPU!) to use for training."""
-    train_num_inner_epochs: int = 1
-    """Number of inner epochs per outer epoch."""
+    reward_function_usage: bool = True
+    """ Using pretrained model to get reward, otherwise, use image with reward in advance"""
+    num_epochs: int =100
 
     sample_batch_size: int = 2
     """Batch size (per GPU!) to use for sampling."""
+    offpolicy_sample_batch_size: int = 1
+    """Batch size for offpolicy from dataset - not larger than sample_batch_size"""
+
+
+    load_dataset_huggingface: bool = False
+    """load from huggingface or local"""
+
+
+    sample_num_steps: int = 50
+    """Number of sampler inference steps."""
     sample_num_batches_per_epoch: int = 1
     """Number of batches to sample per epoch."""
     # resume_from: Optional[str] = "./outputs/checkpoint/checkpoints/checkpoint_20"
-    resume_from: Optional[str] = ""
 
+
+    # train_mode: str = "contrastive"
+    # """ offpolicy or contrastive or other. Train mode"""
+
+    data_folder: str = './inputs/An_extremely_Asian_girl_verlarge'
+    """Top-level logging directory for checkpoint saving."""
+    # hyperparameters
+
+
+
+    resume_from: Optional[str] = "./outputs/checkpoints/checkpoint_1"
+    resume_from: Optional[str] = ""
     """== checkpoin from // Resume training from a checkpoint."""
 
 
 
-    save_freq: int = 5
-    """Number of epochs between saving model checkpoints."""
-    num_checkpoint_limit: int = 10
-    """Number of checkpoints to keep before overwriting old ones."""
+
+    train_batch_size: int = 1
+    """Batch size (per GPU!) to use for training."""
+
+    train_num_inner_epochs: int = 1
+    """Number of inner epochs per outer epoch."""
+
+
+
+
+
+
+
 
 
 # DEFAULT NO CHANGE
-
     mixed_precision: str = "fp16"
     """Mixed precision training."""
     allow_tf32: bool = True
     """Allow tf32 on Ampere GPUs."""
-
     sample_eta: float = 1.0
     """Eta parameter for the DDIM sampler."""
     sample_guidance_scale: float = 5.0
     """Classifier-free guidance weight."""
-
-
     train_use_8bit_adam: bool = False
     """Whether to use the 8bit Adam optimizer from bitsandbytes."""
-    train_learning_rate: float = 3e-4
-    """Learning rate."""
     train_adam_beta1: float = 0.9
     """Adam beta1."""
     train_adam_beta2: float = 0.999
@@ -159,3 +173,8 @@ class DDPOConfig:
                 "You need to install bitsandbytes to use 8bit Adam. "
                 "You can install it with `pip install bitsandbytes`."
             )
+        if self.sample_batch_size>2*self.offpolicy_sample_batch_size and not self.reward_function_usage:
+            raise ImportError(
+                "offpolicy_sample_batch_size should be large than or equal half of sample_batch_size"
+            )
+

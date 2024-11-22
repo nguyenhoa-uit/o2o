@@ -30,7 +30,7 @@
     --save_folder="../ddpo_compressibility4"
 """
 
-
+import requests
 import os
 from dataclasses import dataclass, field
 # import ..datasets import tokenize_ds
@@ -64,9 +64,9 @@ from torchvision import transforms
 
 def jpeg_incompressibility():
     def _fn(images, prompts, metadata):
-        print(f'jpeg_incompressibility images:{images[0]} \n')
-        print(f'jpeg_incompressibility prompts:{prompts} \n')
-        print(f'jpeg_incompressibility metadata:{metadata} \n')
+        # print(f'jpeg_incompressibility images:{images[0]} \n')
+        # print(f'jpeg_incompressibility prompts:{prompts} \n')
+        # print(f'jpeg_incompressibility metadata:{metadata} \n')
 
         if isinstance(images, torch.Tensor):
             images = (images * 255).round().clamp(0, 255).to(torch.uint8).cpu().numpy()
@@ -320,25 +320,31 @@ animals = [
     "zebra"
 ]
 
+prompts = [
+    "An extremely beautiful asian girl",
+]
 
 def prompt_fn():
-    return np.random.choice(animals), {}
+    return np.random.choice(prompts), {}
 
-def image_outputs_logger(image_data, global_step, accelerate_logger,log_type=''):
+def image_outputs_logger(image_data, global_step, accelerate_logger,caption='NA'):
     # For the sake of this example, we will only log the last batch of images
     # and associated data
     result = {}
     images, prompts, _, rewards, _ = image_data[-1]
+    l=len(image_data)
 
     for i, image in enumerate(images):
         prompt = prompts[i]
         reward = rewards[i].item()
-        result[f"save {reward:.2f}_{log_type}"] = image.unsqueeze(0).float()
-
-    accelerate_logger.log_images(
-        result,
-        step=global_step,
-    )
+        result[f"{caption}_{reward:.2f}_index{i}_length{l}"] = image.unsqueeze(0).float()
+    try:
+        accelerate_logger.log_images(
+            result,
+            step=global_step,
+        )
+    except:
+        print("cannot log FileNotFoundError")
 
 
 import math
@@ -392,7 +398,6 @@ class ImageScoreDatasetScore(Dataset):
         batch=(image, torch.tensor(score, dtype=torch.float32), prompt,{},self.data.iloc[idx, 0])
         return batch
 
-import requests
 class ImageScoreDatasetHugging(Dataset):
     def __init__(self,  data_file="Nguyen17/laion_art_en",transform=None,length=5000):
             # dataset= load_dataset("laion/laion-art")
@@ -405,11 +410,10 @@ class ImageScoreDatasetHugging(Dataset):
             print("saving dataset Laion")
             save_name=data_file.split("/")[-1]
             self.data.save_to_disk(f"./outputs/{save_name}.hf")
-            # self.data.save_to_disk("./outputs/laion_art_en.hf")
         
         self.data=self.data['train']
         self.transform = transform
-        self.index=0
+        self.index=30
         if length !=None:
             self.data=self.data[:length]
     def __len__(self):
@@ -448,19 +452,89 @@ class ImageScoreDatasetHugging(Dataset):
         batch=(image, torch.tensor(score, dtype=torch.float16), prompt,{},"NA")
         return batch
 
+# class ImageScoreDatasetHuggingbk(Dataset):
+#     def __init__(self,  data_file="laion/laion2B-multi-joined-translated-to-en",transform=None,length=5000):
+#     #   https://huggingface.co/datasets/laion/laion2B-multi-joined-translated-to-en?row=74
+#             # dataset= load_dataset("laion/laion-art")
+#             # dataset.save_to_disk("./outputs/laion_art.hf")
+#         save_name=data_file.split("/")[-1]
+#         save_name=f"./outputs/{save_name}.hf"
+#         try:   
+#             print("loading dataset Laion local")
+#             self.data= load_dataset(save_name)
+#         except:            
+#             print("loading dataset Laion cloud")
+#             self.data= load_dataset(data_file)
+#             print("saving dataset Laion")
+            
+#             self.data.save_to_disk(save_name)
+#             # self.data.save_to_disk("./outputs/laion_art_en.hf")
+        
+#         self.data=self.data['train']
+#         self.transform = transform
+#         self.index=0
+#         if length !=None:
+#             self.data=self.data[:length]
+#     def __len__(self):
+#         return len(self.data)
+
+#     def __getitem__(self, idx):
+#         self.index+=1
+#         try_load=True
+#         while try_load:
+#             img_link=self.data['URL'][self.index]
+#             print(f"ix  {self.index} link {img_link}")
+
+#             if ("?resize") in img_link:
+#                 img_link=img_link.split("?resize")[0]
+#             tail='jpg'
+#             file_name=f"./inputs/laion_saving/{self.index}_laion_image.{tail}"
+
+#             if self.data['LANGUAGE'] !='en':
+#                 pass
+#             if self.data['WIDTH'] <300:
+#                 pass
+
+#             if self.data['HEIGHT'] <300:
+#                 pass
+
+#             if self.data['prediction']>4 and self.data['prediction']<5.4:
+#                 rd=np.random.randint(100)
+#                 if rd>=20:
+#                     pass
+            
+                
+#             try:
+#                 image = Image.open(requests.get(img_link,stream=True).raw).convert('RGB')
+#                 image.save(file_name)
+#                 image=image.convert('RGB')
+#                 try_load=False
+#                 # image = Image.open(file_name).convert('RGB')
+#             except:
+#                 self.index+=1
+#                 try_load=True
+
+
+
+#         if self.transform:
+#             image = self.transform(image)
+
+#         prompt =self.data['TEXT'][self.index]
+#         score=10*self.data['prediction'][self.index]
+#         batch=(image, torch.tensor(score, dtype=torch.float16), prompt,{},"NA")
+#         return batch
+
 
 
 class ImageScoreDataset(Dataset):
-    def __init__(self,  image_folder,transform=None,reward=None):
+    def __init__(self,  image_folder,transform=None,reward=None,prompt="An extremely beautiful Asian girl"):
         self.data = []
         for file in os.listdir(image_folder):
           self.data.append(file)
         self.image_folder = image_folder
         self.transform = transform
         self.reward=reward
-        self.prompt=image_folder.split("/")[-2]
-        self.prompt=self.prompt.split("_")[:-1]
-        self.prompt=" ".join(self.prompt)
+        self.prompt=prompt
 
     def __len__(self):
         return len(self.data)
@@ -517,7 +591,7 @@ class ScriptArguments:
     )
 
     save_folder: str = field(
-        default="./outputs/lora_weights/Laion_e10", metadata={"help": "the folder to get checkpoin to use"}
+        default="./outputs/lora_weights/Fixing", metadata={"help": "the folder to get checkpoin to use"}
     )
     load_folder: str = field(
         default="", metadata={"help": "the folder to get checkpoin to use"}
@@ -538,15 +612,27 @@ if __name__ == "__main__":
     }
 
 
+
     transform = transforms.Compose(
         [
             transforms.Resize(ddpo_config.resolution, interpolation=transforms.InterpolationMode.BILINEAR),
             transforms.RandomCrop(ddpo_config.resolution),
             transforms.RandomHorizontalFlip() if True else transforms.Lambda(lambda x: x),
             transforms.ToTensor(),
-            transforms.Normalize([0.5], [0.5]),
+            # transforms.Normalize([0.5], [0.5]),
         ]
     )
+
+    transform_valid = transforms.Compose(
+        [
+            transforms.Resize(ddpo_config.resolution, interpolation=transforms.InterpolationMode.BILINEAR),
+            transforms.CenterCrop(ddpo_config.resolution),
+            # transforms.RandomHorizontalFlip() if True else transforms.Lambda(lambda x: x),
+            transforms.ToTensor(),
+            # transforms.Normalize([0.5], [0.5]),
+        ]
+    )
+
 
     print(f' ddo_config {ddpo_config}' )
     print("-------------------------------------------------")
@@ -556,22 +642,16 @@ if __name__ == "__main__":
 
     csv_file=ddpo_config.data_folder+'data.csv'
 
-
-
-
-
-    if ddpo_config.load_dataset=='huggingface':
-        dataset=ImageScoreDatasetHugging(data_file="Nguyen17/laion_art_en",transform=transform,length=5000)
+    if ddpo_config.load_dataset_huggingface:
+        dataset=ImageScoreDatasetHugging(transform=transform,length=5000)
     else:
-        dataset = ImageScoreDataset(image_folder=ddpo_config.data_folder,transform=transform,reward=ddpo_config.positive_reward)
+        dataset = ImageScoreDataset(image_folder=ddpo_config.data_folder,transform=transform,reward=ddpo_config.high_reward)
 
-    if ddpo_config.train_mode=='contrastive':
-        batch_size_short=ddpo_config.offpolicy_sample_batch_size
+
+    if ddpo_config.offpolicy_sample_batch_size>0:
+        dataloader = DataLoader(dataset, batch_size=ddpo_config.offpolicy_sample_batch_size, shuffle=True)
     else:
-
-        batch_size_short=ddpo_config.offpolicy_sample_batch_size
-  
-    dataloader = DataLoader(dataset, batch_size=batch_size_short, shuffle=True)
+        dataloader=None
 
 
     print("------------------------------------------------------------------------")
@@ -616,20 +696,3 @@ if __name__ == "__main__":
     #     print("Not load to github")
     # else:
     #   trainer.push_to_hub(args.hf_hub_model_id+str(ddpo_config.global_step+ddpo_config.num_epochs))
-
-
-    # trainer.train(epochs=epochs)
-
-    # print("\n")
-    # print("------------------------------------------------------------------------")
-    # print("Starting saving model    -----------------------------------------------")
-
-
-    # trainer.save_pretrained(args.save_folder+str(ddpo_config.global_step+2*ddpo_config.num_epochs))
-
-
-    # if (args.hf_hub_model_id==""):
-    #     print("Not load to github")
-    # else:
-    #   trainer.push_to_hub(args.hf_hub_model_id+str(ddpo_config.global_step+2*ddpo_config.num_epochs))
-

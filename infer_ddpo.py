@@ -4,16 +4,18 @@ from IPython.display import display, Image
 # from trl import DefaultDDPOStableDiffusionPipeline
 from codes.modeling_sd_base import DefaultDDPOStableDiffusionPipeline
 
-
+# hugging: hoan17
 # stabilityai/stablelm-2-1_6b
+# stabilityai/stable-diffusion-3-medium
+# stabilityai/stable-diffusion-2-1
 pipeline = DefaultDDPOStableDiffusionPipeline(
    "stabilityai/stable-diffusion-2-1",
 )
 
-model='base_Stable2.1'
+model='base_Stable'
 weight=None
-weight='large_girls1'
-loop=777
+weight='Fixing20'
+loop=11
 
 if weight !=None:
     model=weight
@@ -28,9 +30,9 @@ device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cp
 pipeline.vae.to(device, torch.float16)
 pipeline.text_encoder.to(device, torch.float16)
 pipeline.unet.to(device, torch.float16)
-seed=6789
+seed=1
 torch.manual_seed(seed)
-p="An extremely beautiful Asian lady"
+p="An extremely beautiful Asian girl"
 q="Some girls are talking on grass"
 
 # b="A yellowish tiger"

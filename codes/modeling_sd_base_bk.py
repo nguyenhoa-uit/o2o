@@ -22,14 +22,11 @@ from typing import Any, Callable, Dict, List, Optional, Union
 import numpy as np
 import torch
 import torch.utils.checkpoint as checkpoint
-from torch.utils.data import Dataset, DataLoader
-from PIL import Image
-
 from diffusers import DDIMScheduler, StableDiffusionPipeline, UNet2DConditionModel
 from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion import rescale_noise_cfg
+from transformers.utils import is_peft_available
 
-from .core import randn_tensor
-from .import_utils import is_peft_available
+from ..core import randn_tensor
 from .sd_utils import convert_state_dict_to_diffusers
 
 
@@ -85,9 +82,6 @@ class DDPOStableDiffusionPipeline:
     def scheduler_step(self, *args, **kwargs) -> DDPOSchedulerOutput:
         raise NotImplementedError
 
-    def scheduler_step_offline(self, *args, **kwargs) -> DDPOSchedulerOutput:
-        raise NotImplementedError
-
     @property
     def unet(self):
         """
@@ -130,12 +124,6 @@ class DDPOStableDiffusionPipeline:
         """
         raise NotImplementedError
 
-    def call_offline(self, *args, **kwargs):
-        """
-        Sets the progress bar config for the pipeline
-        """
-        raise NotImplementedError
-    
     def set_progress_bar_config(self, *args, **kwargs):
         """
         Sets the progress bar config for the pipeline
@@ -196,8 +184,6 @@ def _get_variance(self, timestep, prev_timestep):
     variance = (beta_prod_t_prev / beta_prod_t) * (1 - alpha_prod_t / alpha_prod_t_prev)
 
     return variance
-
-# scheduler_output = scheduler_step(self.scheduler, noise_pred, t, latents, eta,prev_sample=latents_prev)
 
 
 def scheduler_step(
@@ -268,20 +254,24 @@ def scheduler_step(
 
     # 3. compute predicted original sample from predicted noise also called
     # "predicted x_0" of formula (12) from https://huggingface.co/papers/2010.02502
-    if self.config.prediction_type == "epsilon":
-        pred_original_sample = (sample - beta_prod_t ** (0.5) * model_output) / alpha_prod_t ** (0.5)
-        pred_epsilon = model_output
-    elif self.config.prediction_type == "sample":
-        pred_original_sample = model_output
-        pred_epsilon = (sample - alpha_prod_t ** (0.5) * pred_original_sample) / beta_prod_t ** (0.5)
-    elif self.config.prediction_type == "v_prediction":
-        pred_original_sample = (alpha_prod_t**0.5) * sample - (beta_prod_t**0.5) * model_output
-        pred_epsilon = (alpha_prod_t**0.5) * model_output + (beta_prod_t**0.5) * sample
-    else:
-        raise ValueError(
-            f"prediction_type given as {self.config.prediction_type} must be one of `epsilon`, `sample`, or"
-            " `v_prediction`"
-        )
+    # if self.config.prediction_type == "epsilon":
+    #     pred_original_sample = (sample - beta_prod_t ** (0.5) * model_output) / alpha_prod_t ** (0.5)
+    #     pred_epsilon = model_output
+    # elif self.config.prediction_type == "sample":
+    #     pred_original_sample = model_output
+    #     pred_epsilon = (sample - alpha_prod_t ** (0.5) * pred_original_sample) / beta_prod_t ** (0.5)
+    # elif self.config.prediction_type == "v_prediction":
+    #     pred_original_sample = (alpha_prod_t**0.5) * sample - (beta_prod_t**0.5) * model_output
+    #     pred_epsilon = (alpha_prod_t**0.5) * model_output + (beta_prod_t**0.5) * sample
+    # else:
+    #     raise ValueError(
+    #         f"prediction_type given as {self.config.prediction_type} must be one of `epsilon`, `sample`, or"
+    #         " `v_prediction`"
+    #     )
+    
+
+    pred_original_sample = (sample - beta_prod_t ** (0.5) * model_output) / alpha_prod_t ** (0.5)
+    pred_epsilon = model_output
 
     # 4. Clip or threshold "predicted x_0"
     if self.config.thresholding:
@@ -301,7 +291,7 @@ def scheduler_step(
         # the pred_epsilon is always re-derived from the clipped x_0 in Glide
         pred_epsilon = (sample - alpha_prod_t ** (0.5) * pred_original_sample) / beta_prod_t ** (0.5)
 
-    # 6. compute "direction pointing to x_t" of formula (12) from https://huggingface.co/papers/2010.02502
+    # 6. compute "direction pointing to x_t" of formula (12) from   
     pred_sample_direction = (1 - alpha_prod_t_prev - std_dev_t**2) ** (0.5) * pred_epsilon
 
     # 7. compute x_t without "random noise" of formula (12) from https://huggingface.co/papers/2010.02502
@@ -334,285 +324,11 @@ def scheduler_step(
     return DDPOSchedulerOutput(prev_sample.type(sample.dtype), log_prob)
 
 
-# 1. The o
-# def scheduler_step(
-#     self,
-#     model_output: torch.FloatTensor,
-#     timestep: int,
-#     sample: torch.FloatTensor,
-#     eta: float = 0.0,
-#     use_clipped_model_output: bool = False,
-#     generator=None,
-#     prev_sample: Optional[torch.FloatTensor] = None,
-# ) -> DDPOSchedulerOutput:
-#     """
-
-#     Predict the sample at the previous timestep by reversing the SDE. Core function to propagate the diffusion
-#     process from the learned model outputs (most often the predicted noise).
-
-#     Args:
-#         model_output (`torch.FloatTensor`): direct output from learned diffusion model.
-#         timestep (`int`): current discrete timestep in the diffusion chain.
-#         sample (`torch.FloatTensor`):
-#             current instance of sample being created by diffusion process.
-#         eta (`float`): weight of noise for added noise in diffusion step.
-#         use_clipped_model_output (`bool`): if `True`, compute "corrected" `model_output` from the clipped
-#             predicted original sample. Necessary because predicted original sample is clipped to [-1, 1] when
-#             `self.config.clip_sample` is `True`. If no clipping has happened, "corrected" `model_output` would
-#             coincide with the one provided as input and `use_clipped_model_output` will have not effect.
-#         generator: random number generator.
-#         variance_noise (`torch.FloatTensor`): instead of generating noise for the variance using `generator`, we
-#             can directly provide the noise for the variance itself. This is useful for methods such as
-#             CycleDiffusion. (https://huggingface.co/papers/2210.05559)
-
-#     Returns:
-#         `DDPOSchedulerOutput`: the predicted sample at the previous timestep and the log probability of the sample
-#     """
-
-#     if self.num_inference_steps is None:
-#         raise ValueError(
-#             "Number of inference steps is 'None', you need to run 'set_timesteps' after creating the scheduler"
-#         )
-
-#     # See formulas (12) and (16) of DDIM paper https://huggingface.co/papers/2010.02502
-#     # Ideally, read DDIM paper in-detail understanding
-
-#     # Notation (<variable name> -> <name in paper>
-#     # - pred_noise_t -> e_theta(x_t, t)
-#     # - pred_original_sample -> f_theta(x_t, t) or x_0
-#     # - std_dev_t -> sigma_t
-#     # - eta -> η
-#     # - pred_sample_direction -> "direction pointing to x_t"
-#     # - pred_prev_sample -> "x_t-1"
-#     # 1. get previous step value (=t-1)
-#     prev_timestep = timestep - self.config.num_train_timesteps // self.num_inference_steps
-#     # to prevent OOB on gather
-#     prev_timestep = torch.clamp(prev_timestep, 0, self.config.num_train_timesteps - 1)
-
-#     # 2. compute alphas, betas
-#     alpha_prod_t = self.alphas_cumprod.gather(0, timestep.cpu())
-#     alpha_prod_t_prev = torch.where(
-#         prev_timestep.cpu() >= 0,
-#         self.alphas_cumprod.gather(0, prev_timestep.cpu()),
-#         self.final_alpha_cumprod,
-#     )
-#     alpha_prod_t = _left_broadcast(alpha_prod_t, sample.shape).to(sample.device)
-#     alpha_prod_t_prev = _left_broadcast(alpha_prod_t_prev, sample.shape).to(sample.device)
-
-#     beta_prod_t = 1 - alpha_prod_t
-
-#     # 3. compute predicted original sample from predicted noise also called
-#     # "predicted x_0" of formula (12) from https://huggingface.co/papers/2010.02502
-#     if self.config.prediction_type == "epsilon":
-#         pred_original_sample = (sample - beta_prod_t ** (0.5) * model_output) / alpha_prod_t ** (0.5)
-#         pred_epsilon = model_output
-#     elif self.config.prediction_type == "sample":
-#         pred_original_sample = model_output
-#         pred_epsilon = (sample - alpha_prod_t ** (0.5) * pred_original_sample) / beta_prod_t ** (0.5)
-#     elif self.config.prediction_type == "v_prediction":
-#         pred_original_sample = (alpha_prod_t**0.5) * sample - (beta_prod_t**0.5) * model_output
-#         pred_epsilon = (alpha_prod_t**0.5) * model_output + (beta_prod_t**0.5) * sample
-#     else:
-#         raise ValueError(
-#             f"prediction_type given as {self.config.prediction_type} must be one of `epsilon`, `sample`, or"
-#             " `v_prediction`"
-#         )
-
-#     # 4. Clip or threshold "predicted x_0"
-#     if self.config.thresholding:
-#         pred_original_sample = self._threshold_sample(pred_original_sample)
-#     elif self.config.clip_sample:
-#         pred_original_sample = pred_original_sample.clamp(
-#             -self.config.clip_sample_range, self.config.clip_sample_range
-#         )
-
-#     # 5. compute variance: "sigma_t(η)" -> see formula (16)
-#     # σ_t = sqrt((1 − α_t−1)/(1 − α_t)) * sqrt(1 − α_t/α_t−1)
-#     variance = _get_variance(self, timestep, prev_timestep)
-#     std_dev_t = eta * variance ** (0.5)
-#     std_dev_t = _left_broadcast(std_dev_t, sample.shape).to(sample.device)
-
-#     if use_clipped_model_output:
-#         # the pred_epsilon is always re-derived from the clipped x_0 in Glide
-#         pred_epsilon = (sample - alpha_prod_t ** (0.5) * pred_original_sample) / beta_prod_t ** (0.5)
-
-#     # 6. compute "direction pointing to x_t" of formula (12) from https://huggingface.co/papers/2010.02502
-#     pred_sample_direction = (1 - alpha_prod_t_prev - std_dev_t**2) ** (0.5) * pred_epsilon
-
-#     # 7. compute x_t without "random noise" of formula (12) from https://huggingface.co/papers/2010.02502
-#     prev_sample_mean = alpha_prod_t_prev ** (0.5) * pred_original_sample + pred_sample_direction
-
-#     if prev_sample is not None and generator is not None:
-#         raise ValueError(
-#             "Cannot pass both generator and prev_sample. Please make sure that either `generator` or"
-#             " `prev_sample` stays `None`."
-#         )
-
-#     if prev_sample is None:
-#         variance_noise = randn_tensor(
-#             model_output.shape,
-#             generator=generator,
-#             device=model_output.device,
-#             dtype=model_output.dtype,
-#         )
-#         prev_sample = prev_sample_mean + std_dev_t * variance_noise
-
-#     # log prob of prev_sample given prev_sample_mean and std_dev_t
-#     log_prob = (
-#         -((prev_sample.detach() - prev_sample_mean) ** 2) / (2 * (std_dev_t**2))
-#         - torch.log(std_dev_t)
-#         - torch.log(torch.sqrt(2 * torch.as_tensor(np.pi)))
-#     )
-#     # mean along all but batch dimension
-#     log_prob = log_prob.mean(dim=tuple(range(1, log_prob.ndim)))
-
-#     return DDPOSchedulerOutput(prev_sample.type(sample.dtype), log_prob)
-
-
-def scheduler_step_offline(
-    self,
-    # model_output: torch.FloatTensor,
-    timestep: int,
-    sample: torch.FloatTensor,
-    eta: float = 0.0,
-    use_clipped_model_output: bool = False,
-    generator=None,
-    prev_sample: Optional[torch.FloatTensor] = None,
-) -> DDPOSchedulerOutput:
-    """
-
-    Predict the sample at the previous timestep by reversing the SDE. Core function to propagate the diffusion
-    process from the learned model outputs (most often the predicted noise).
-
-    Args:
-        model_output (`torch.FloatTensor`): direct output from learned diffusion model.
-        timestep (`int`): current discrete timestep in the diffusion chain.
-        sample (`torch.FloatTensor`):
-            current instance of sample being created by diffusion process.
-        eta (`float`): weight of noise for added noise in diffusion step.
-        use_clipped_model_output (`bool`): if `True`, compute "corrected" `model_output` from the clipped
-            predicted original sample. Necessary because predicted original sample is clipped to [-1, 1] when
-            `self.config.clip_sample` is `True`. If no clipping has happened, "corrected" `model_output` would
-            coincide with the one provided as input and `use_clipped_model_output` will have not effect.
-        generator: random number generator.
-        variance_noise (`torch.FloatTensor`): instead of generating noise for the variance using `generator`, we
-            can directly provide the noise for the variance itself. This is useful for methods such as
-            CycleDiffusion. (https://huggingface.co/papers/2210.05559)
-
-    Returns:
-        `DDPOSchedulerOutput`: the predicted sample at the previous timestep and the log probability of the sample
-    """
-    model_output=torch.copy(sample)
-    
-    
-    if self.num_inference_steps is None:
-        raise ValueError(
-            "Number of inference steps is 'None', you need to run 'set_timesteps' after creating the scheduler"
-        )
-
-    # See formulas (12) and (16) of DDIM paper https://huggingface.co/papers/2010.02502
-    # Ideally, read DDIM paper in-detail understanding
-
-    # Notation (<variable name> -> <name in paper>
-    # - pred_noise_t -> e_theta(x_t, t)
-    # - pred_original_sample -> f_theta(x_t, t) or x_0
-    # - std_dev_t -> sigma_t
-    # - eta -> η
-    # - pred_sample_direction -> "direction pointing to x_t"
-    # - pred_prev_sample -> "x_t-1"
-    # 1. get previous step value (=t-1)
-    prev_timestep = timestep - self.config.num_train_timesteps // self.num_inference_steps
-    # to prevent OOB on gather
-    prev_timestep = torch.clamp(prev_timestep, 0, self.config.num_train_timesteps - 1)
-
-    # 2. compute alphas, betas
-    alpha_prod_t = self.alphas_cumprod.gather(0, timestep.cpu())
-    alpha_prod_t_prev = torch.where(
-        prev_timestep.cpu() >= 0,
-        self.alphas_cumprod.gather(0, prev_timestep.cpu()),
-        self.final_alpha_cumprod,
-    )
-    alpha_prod_t = _left_broadcast(alpha_prod_t, sample.shape).to(sample.device)
-    alpha_prod_t_prev = _left_broadcast(alpha_prod_t_prev, sample.shape).to(sample.device)
-
-    beta_prod_t = 1 - alpha_prod_t
-
-    # 3. compute predicted original sample from predicted noise also called
-    # "predicted x_0" of formula (12) from https://huggingface.co/papers/2010.02502
-    if self.config.prediction_type == "epsilon":
-        pred_original_sample = (sample - beta_prod_t ** (0.5) * model_output) / alpha_prod_t ** (0.5)
-        pred_epsilon = model_output
-    elif self.config.prediction_type == "sample":
-        pred_original_sample = model_output
-        pred_epsilon = (sample - alpha_prod_t ** (0.5) * pred_original_sample) / beta_prod_t ** (0.5)
-    elif self.config.prediction_type == "v_prediction":
-        pred_original_sample = (alpha_prod_t**0.5) * sample - (beta_prod_t**0.5) * model_output
-        pred_epsilon = (alpha_prod_t**0.5) * model_output + (beta_prod_t**0.5) * sample
-    else:
-        raise ValueError(
-            f"prediction_type given as {self.config.prediction_type} must be one of `epsilon`, `sample`, or"
-            " `v_prediction`"
-        )
-
-    # 4. Clip or threshold "predicted x_0"
-    if self.config.thresholding:
-        pred_original_sample = self._threshold_sample(pred_original_sample)
-    elif self.config.clip_sample:
-        pred_original_sample = pred_original_sample.clamp(
-            -self.config.clip_sample_range, self.config.clip_sample_range
-        )
-
-    # 5. compute variance: "sigma_t(η)" -> see formula (16)
-    # σ_t = sqrt((1 − α_t−1)/(1 − α_t)) * sqrt(1 − α_t/α_t−1)
-    variance = _get_variance(self, timestep, prev_timestep)
-    std_dev_t = eta * variance ** (0.5)
-    std_dev_t = _left_broadcast(std_dev_t, sample.shape).to(sample.device)
-
-    if use_clipped_model_output:
-        # the pred_epsilon is always re-derived from the clipped x_0 in Glide
-        pred_epsilon = (sample - alpha_prod_t ** (0.5) * pred_original_sample) / beta_prod_t ** (0.5)
-
-    # 6. compute "direction pointing to x_t" of formula (12) from https://huggingface.co/papers/2010.02502
-    pred_sample_direction = (1 - alpha_prod_t_prev - std_dev_t**2) ** (0.5) * pred_epsilon
-
-    # 7. compute x_t without "random noise" of formula (12) from https://huggingface.co/papers/2010.02502
-    prev_sample_mean = alpha_prod_t_prev ** (0.5) * pred_original_sample + pred_sample_direction
-
-    if prev_sample is not None and generator is not None:
-        raise ValueError(
-            "Cannot pass both generator and prev_sample. Please make sure that either `generator` or"
-            " `prev_sample` stays `None`."
-        )
-
-    if prev_sample is None:
-        variance_noise = randn_tensor(
-            model_output.shape,
-            generator=generator,
-            device=model_output.device,
-            dtype=model_output.dtype,
-        )
-        prev_sample = prev_sample_mean + std_dev_t * variance_noise
-
-    # log prob of prev_sample given prev_sample_mean and std_dev_t
-    log_prob = (
-        -((prev_sample.detach() - prev_sample_mean) ** 2) / (2 * (std_dev_t**2))
-        - torch.log(std_dev_t)
-        - torch.log(torch.sqrt(2 * torch.as_tensor(np.pi)))
-    )
-    # mean along all but batch dimension
-    log_prob = log_prob.mean(dim=tuple(range(1, log_prob.ndim)))
-
-    return DDPOSchedulerOutput(prev_sample.type(sample.dtype), log_prob)   
-
-
 # 1. The output type for call is different as the logprobs are now returned
 # 2. An extra method called `scheduler_step` is added which is used to constraint the scheduler output
-
 @torch.no_grad()
 def pipeline_step(
-    self_all,
     self,
-    dataloader: DataLoader=None,
     prompt: Optional[Union[str, List[str]]] = None,
     height: Optional[int] = None,
     width: Optional[int] = None,
@@ -631,7 +347,6 @@ def pipeline_step(
     callback_steps: int = 1,
     cross_attention_kwargs: Optional[Dict[str, Any]] = None,
     guidance_rescale: float = 0.0,
-    show_image_log: bool =True,
 ):
     r"""
     Function invoked when calling the pipeline for generation.  Args: prompt (`str` or `List[str]`, *optional*): The prompt or prompts to guide the image generation. If not defined, one has to pass `prompt_embeds`.  instead.  height (`int`, *optional*, defaults to self.unet.config.sample_size * self.vae_scale_factor): The height in pixels of the generated image.
@@ -754,14 +469,11 @@ def pipeline_step(
         generator,
         latents,
     )
-    if show_image_log and self_all.sample_latents[0]==None:
-        self_all.sample_latents[0]=latents[:1]
-        self_all.sample_latents[1]=prompt_embeds[:2]
-    if show_image_log:
-        latents=torch.cat((latents,self_all.sample_latents[0]),dim=0)
-        prompt_embeds=torch.cat((prompt_embeds,self_all.sample_latents[1]),dim=0)
-    
-    
+
+
+
+    self.scheduler.alphas[0]*self.scheduler.alphas[1]*self.scheduler.alphas[2]*self.scheduler.alphas[3]
+
     # 6. Denoising loop
     num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
     all_latents = [latents]
@@ -825,272 +537,6 @@ def pipeline_step(
     return DDPOPipelineOutput(image, all_latents, all_log_probs)
 
 
-    # num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
-    # all_latents = [latents]
-    # all_log_probs = []
-
-    # with self.progress_bar(total=num_inference_steps) as progress_bar:
-    #     for i, t in enumerate(timesteps):
-    #         # expand the latents if we are doing classifier free guidance
-    #         latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
-    #         latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
-
-    #         # predict the noise residual
-    #         noise_pred = self.unet(
-    #          latent_model_input   ,
-    #             t,
-    #             encoder_hidden_states=prompt_embeds,
-    #             cross_attention_kwargs=cross_attention_kwargs,
-    #             return_dict=False,
-    #         )[0]
-
-    #         # perform guidance
-    #         if do_classifier_free_guidance:
-    #             noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-    #             noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
-
-    #         if do_classifier_free_guidance and guidance_rescale > 0.0:
-    #             # Based on 3.4. in https://huggingface.co/papers/2305.08891
-    #             noise_pred = rescale_noise_cfg(noise_pred, noise_pred_text, guidance_rescale=guidance_rescale)
-
-
-    #         # compute the previous noisy sample x_t -> x_t-1
-    #         scheduler_output = scheduler_step(self.scheduler, noise_pred, t, latents, eta)
-    #         latents = scheduler_output.latents
-    #         log_prob = scheduler_output.log_probs
-
-    #         all_latents.append(latents)
-    #         all_log_probs.append(log_prob)
-
-    #         # call the callback, if provided
-    #         if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
-    #             progress_bar.update()
-    #             if callback is not None and i % callback_steps == 0:
-    #                 callback(i, t, latents)
-
-    # if not output_type == "latent":
-    #     image = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False)[0]
-    #     image, has_nsfw_concept = self.run_safety_checker(image, device, prompt_embeds.dtype)
-    # else:
-    #     image = latents
-    #     has_nsfw_concept = None
-
-    # if has_nsfw_concept is None:
-    #     do_denormalize = [True] * image.shape[0]
-    # else:
-    #     do_denormalize = [not has_nsfw for has_nsfw in has_nsfw_concept]
-
-    # image = self.image_processor.postprocess(image, output_type=output_type, do_denormalize=do_denormalize)
-
-    # # Offload last model to CPU
-    # if hasattr(self, "final_offload_hook") and self.final_offload_hook is not None:
-    #     self.final_offload_hook.offload()
-
-    # return DDPOPipelineOutput(image, all_latents, all_log_probs)
-
-from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
-
-
-def forward_noising(latents, timesteps, scheduler,device):
-    """
-    Adds noise to the latent representation using a scheduler's noise schedule.
-    
-    Args:
-    latents (torch.Tensor): The latent representations of the image.
-    timesteps (torch.Tensor): The timestep at which to add noise.
-    scheduler: The scheduler to determine the noise schedule.
-    Returns:
-    torch.Tensor: The noised latent representations.
-    """
-    noise = torch.randn_like(latents,device=device)
-    alpha_t = scheduler.alphas_cumprod.to(device)[timesteps].sqrt()
-
-
-    sigma_t = (1 - scheduler.alphas_cumprod.to(device)[timesteps]).to(device).sqrt()
-    temp1=alpha_t * latents.to(device)
-    temp2=sigma_t * noise
-    return temp1+temp2
-    
-
-@torch.no_grad()
-def pipeline_step_offline(
-    self,
-    images_offline=None,
-    prompt: Optional[Union[str, List[str]]] = None,
-    height: Optional[int] = None,
-    width: Optional[int] = None,
-    num_inference_steps: int = 50,
-    guidance_scale: float = 7.5,
-    negative_prompt: Optional[Union[str, List[str]]] = None,
-    num_images_per_prompt: Optional[int] = 1,
-    eta: float = 0.0,
-    generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
-    latents: Optional[torch.FloatTensor] = None,
-    prompt_embeds: Optional[torch.FloatTensor] = None,
-    negative_prompt_embeds: Optional[torch.FloatTensor] = None,
-    output_type: Optional[str] = "pil",
-    return_dict: bool = True,
-    callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
-    callback_steps: int = 1,
-    cross_attention_kwargs: Optional[Dict[str, Any]] = None,
-    guidance_rescale: float = 0.0,
-
-):
-    r"""
-   
-
-    Returns:
-        `DDPOPipelineOutput`: The generated image, the predicted latents used to generate the image and the associated log probabilities
-    """
-
-    # 0. Default height and width to unet
-    height = height or self.unet.config.sample_size * self.vae_scale_factor
-    width = width or self.unet.config.sample_size * self.vae_scale_factor
-
-    # 1. Check inputs. Raise error if not correct
-    self.check_inputs(
-        prompt,
-        height,
-        width,
-        callback_steps,
-        negative_prompt,
-        prompt_embeds,
-        negative_prompt_embeds,
-    )
-
-    # 2. Define call parameters
-    if prompt is not None and isinstance(prompt, str):
-        batch_size = 1
-    elif prompt is not None and isinstance(prompt, list):
-        batch_size = len(prompt)
-    else:
-        batch_size = prompt_embeds.shape[0]
-
-    device = self._execution_device
-    # here `guidance_scale` is defined analog to the guidance weight `w` of equation (2)
-    # of the Imagen paper: https://huggingface.co/papers/2205.11487 . `guidance_scale = 1`
-    # corresponds to doing no classifier free guidance.
-    do_classifier_free_guidance = guidance_scale > 1.0
-
-    # 3. Encode input prompt
-    text_encoder_lora_scale = cross_attention_kwargs.get("scale", None) if cross_attention_kwargs is not None else None
-    prompt_embeds = self._encode_prompt(
-        prompt,
-        device,
-        num_images_per_prompt,
-        do_classifier_free_guidance,
-        negative_prompt,
-        prompt_embeds=prompt_embeds,
-        negative_prompt_embeds=negative_prompt_embeds,
-        lora_scale=text_encoder_lora_scale,
-    )
-
-    # 4. Prepare timesteps
-    self.scheduler.set_timesteps(num_inference_steps, device=device)
-    timesteps = self.scheduler.timesteps
-
-    # 5. Prepare latent variables
-    num_channels_latents = self.unet.config.in_channels
-
-    images_offline=[images_offline[i].to(device,self.dtype).unsqueeze(0) for i in range(len(images_offline))]
-
-
-    # Encode the image into latent space using VAE
-    # latents_single = [self.vae.encode(i).latent_dist.sample() * self.vae.config.scaling_factor for i in images_offline]
-    latents_single = [self.vae.encode(i).latent_dist.sample() * self.vae.config.scaling_factor for i in images_offline]
-
-
-
-    # Log pipeline_step_offline latents shape model sd torch.Size([1, 4, 64, 64])
-
-    # print(f'Log pipeline_step_offline latents shape model sd {latents_single[0].shape}')
-    latents_noise_list=[torch.cat(latents_single,dim=0)]
-
-
-# def forward_noising(latents, timesteps_ix, scheduler,device):
-    with self.progress_bar(total=num_inference_steps) as progress_bar:
-        for i, step in enumerate(torch.flip(timesteps,dims=[0])):
-            latents_single=[forward_noising(latents_single[ix],torch.tensor([step]).to(device),self.scheduler,device) for ix in range(len(latents_single))]
-
-            latents_noise_list.append(torch.cat(latents_single,dim=0).to(device,self.dtype))
-
-    # Last element is no noise
-    latents_noise_list=latents_noise_list[::-1]
-
-
-    num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
-
-    all_latents_offline = [latents_noise_list[0]]
-    all_log_probs_offline = []
-
-    with self.progress_bar(total=num_inference_steps) as progress_bar:
-        for i, t in enumerate(timesteps):
-            latents=latents_noise_list[i]
-            latents_prev=latents_noise_list[i+1]
-            # expand the latents if we are doing classifier free guidance
-            latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
-            latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
-
-            # latent_model_input_prev = torch.cat([latents_prev] * 2) if do_classifier_free_guidance else latents_prev
-            # latent_model_input_prev = self.scheduler.scale_model_input(latent_model_input_prev, t)
-
-            # predict the noise residual
-            noise_pred = self.unet(
-                latent_model_input,
-                t,
-                encoder_hidden_states=prompt_embeds,
-                cross_attention_kwargs=cross_attention_kwargs,
-                return_dict=False,
-            )[0]
-
-            # perform guidance
-            if do_classifier_free_guidance:
-                noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-                noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
-
-            if do_classifier_free_guidance and guidance_rescale > 0.0:
-                # Based on 3.4. in https://huggingface.co/papers/2305.08891
-                noise_pred = rescale_noise_cfg(noise_pred, noise_pred_text, guidance_rescale=guidance_rescale)
-
-            # compute the previous noisy sample x_t -> x_t-1
-            scheduler_output = scheduler_step(self.scheduler, noise_pred, t, latents, eta,prev_sample=latents_prev)
-            latents = scheduler_output.latents
-            log_prob = scheduler_output.log_probs
-
-            all_latents_offline.append(latents_prev)
-            all_log_probs_offline.append(log_prob)
-
-            # call the callback, if provided
-            if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
-                progress_bar.update()
-                if callback is not None and i % callback_steps == 0:
-                    callback(i, t, latents)
-
-    if not output_type == "latent":
-        image = self.vae.decode(all_latents_offline[-5][-1:].to(device) / self.vae.config.scaling_factor, return_dict=False)[0]
-        image, has_nsfw_concept = self.run_safety_checker(image, device, prompt_embeds.dtype)
-    else:
-        image = latents
-        has_nsfw_concept = None
-
-
-    if has_nsfw_concept is None:
-        do_denormalize = [True] * image.shape[0]
-    else:
-        do_denormalize = [not has_nsfw for has_nsfw in has_nsfw_concept]
-
-    image = self.image_processor.postprocess(image, output_type=output_type, do_denormalize=do_denormalize)
-
-    # Offload last model to CPU
-    if hasattr(self, "final_offload_hook") and self.final_offload_hook is not None:
-        self.final_offload_hook.offload()
-    # image_sample=image[:1]
-    # image=image[1:]
-    # all_latents_offline_sample=[i[:1] for i in all_latents_offline]
-    # all_latents_offline=[i[1:] for i in all_latents_offline]
-
-    return DDPOPipelineOutput(image, all_latents_offline, all_log_probs_offline)
-
 def pipeline_step_with_grad(
     pipeline,
     prompt: Optional[Union[str, List[str]]] = None,
@@ -1118,13 +564,19 @@ def pipeline_step_with_grad(
     guidance_rescale: float = 0.0,
 ):
     r"""
-    Function to get RGB image with gradients attached to the model weights.  Args: prompt (`str` or `List[str]`, *optional*): The prompt or prompts to guide the image generation. If not defined, one has to pass `prompt_embeds`.  instead.  height (`int`, *optional*, defaults to pipeline.unet.config.sample_size * pipeline.vae_scale_factor): The height in pixels of the generated image.
-        width (`int`, *optional*, defaults to pipeline.unet.config.sample_size * pipeline.vae_scale_factor):
+    Function to get RGB image with gradients attached to the model weights.
+
+    Args:
+        prompt (`str` or `List[str]`, *optional*, defaults to `None`):
+            The prompt or prompts to guide the image generation. If not defined, one has to pass `prompt_embeds` instead.
+        height (`int`, *optional*, defaults to `pipeline.unet.config.sample_size * pipeline.vae_scale_factor`):
+            The height in pixels of the generated image.
+        width (`int`, *optional*, defaults to `pipeline.unet.config.sample_size * pipeline.vae_scale_factor`):
             The width in pixels of the generated image.
-        num_inference_steps (`int`, *optional*, defaults to 50):
+        num_inference_steps (`int`, *optional*, defaults to `50`):
             The number of denoising steps. More denoising steps usually lead to a higher quality image at the
             expense of slower inference.
-        guidance_scale (`float`, *optional*, defaults to 7.5):
+        guidance_scale (`float`, *optional*, defaults to `7.5`):
             Guidance scale as defined in [Classifier-Free Diffusion Guidance](https://huggingface.co/papers/2207.12598).
             `guidance_scale` is defined as `w` of equation 2. of [Imagen
             Paper](https://huggingface.co/papers/2205.11487). Guidance scale is enabled by setting `guidance_scale >
@@ -1335,6 +787,7 @@ def pipeline_step_with_grad(
     else:
         do_denormalize = [not has_nsfw for has_nsfw in has_nsfw_concept]
 
+    # denomilize image
     image = pipeline.image_processor.postprocess(image, output_type=output_type, do_denormalize=do_denormalize)
 
     # Offload last model to CPU
@@ -1376,19 +829,14 @@ class DefaultDDPOStableDiffusionPipeline(DDPOStableDiffusionPipeline):
         self.sd_pipeline.text_encoder.requires_grad_(False)
         self.sd_pipeline.unet.requires_grad_(not self.use_lora)
 
-        self.sample_latents=[None,None]
-
-
     def __call__(self, *args, **kwargs) -> DDPOPipelineOutput:
-        return pipeline_step(self,self.sd_pipeline, *args, **kwargs)
+        return pipeline_step(self.sd_pipeline, *args, **kwargs)
 
     def rgb_with_grad(self, *args, **kwargs) -> DDPOPipelineOutput:
         return pipeline_step_with_grad(self.sd_pipeline, *args, **kwargs)
 
     def scheduler_step(self, *args, **kwargs) -> DDPOSchedulerOutput:
         return scheduler_step(self.sd_pipeline.scheduler, *args, **kwargs)
-
-
 
     @property
     def unet(self):
@@ -1413,10 +861,6 @@ class DefaultDDPOStableDiffusionPipeline(DDPOStableDiffusionPipeline):
     @property
     def autocast(self):
         return contextlib.nullcontext if self.use_lora else None
-
-    def call_offline(self, *args, **kwargs) -> DDPOSchedulerOutput:
-        return pipeline_step_offline(self.sd_pipeline, *args, **kwargs)
-
 
     def save_pretrained(self, output_dir):
         if self.use_lora:

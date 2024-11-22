@@ -215,7 +215,6 @@ class DDPOTrainer(BaseTrainer):
             self.first_epoch = int(config.resume_from.split("_")[-1]) + 1
         else:
             self.first_epoch = 0
-        self.valid_data=None
 
 
 
@@ -227,8 +226,6 @@ class DDPOTrainer(BaseTrainer):
         global_step = self.config.global_step
         if epochs is None:
             epochs = self.config.num_epochs
-
-        self.valid_data=next(iter(self.dataloader))
         for epoch in range(self.first_epoch, epochs):
 
             print("\n")
@@ -302,14 +299,14 @@ class DDPOTrainer(BaseTrainer):
         rewards = torch.cat(rewards)
 
         rewards = self.accelerator.gather(rewards).cpu().numpy()
-        valid_value=0
+
         self.accelerator.log(
             {
                 "reward": rewards,
                 "epoch": epoch,
                 "reward_mean": rewards.mean(),
                 "reward_std": rewards.std(),
-                "test": valid_value,
+                "test": epoch,
             },
             step=global_step,
         )
@@ -374,8 +371,7 @@ class DDPOTrainer(BaseTrainer):
                 raise ValueError(
                     "Optimization step should have been performed by this point. Please check calculated gradient accumulation settings."
                 )
-  
-        valid_value=self.compute_valid_value(batch_size=self.config.offpolicy_sample_batch_size)
+
 
         # Bị lỗi    
         try:
@@ -386,15 +382,7 @@ class DDPOTrainer(BaseTrainer):
             print('checkpoint_0 name already exists. ')
         return global_step
 
-    def compute_valid_value(self,batch_size):
-        log_probs=self._generate_samples_offline_valid(
-        batch_size=batch_size,
-        n=self.valid_data
-        ) 
-        res=log_probs
-        return res
-
-    def _generate_samples_with_mode(self,iterations, batch_size,offpolicy_batch_size):
+    def _generate_samples_with_mode(self, iterations, batch_size,offpolicy_batch_size):
         onpolicy_batch_size=batch_size-offpolicy_batch_size
         if offpolicy_batch_size==0:
             if self.config.reward_function_usage:
@@ -411,25 +399,16 @@ class DDPOTrainer(BaseTrainer):
                 prompts=prompts,
                     )
         if onpolicy_batch_size==0:
-            temp=next(iter(self.dataloader))
-            samples, prompt_image_pairs,prompts= self._generate_samples_offline(
+            return self._generate_samples_offline(
         iterations=iterations,
         batch_size=offpolicy_batch_size,
-        n=temp
         ) 
-            return samples, prompt_image_pairs
 
-        temp=next(iter(self.dataloader))
+        
         off_samples, off_prompt_image_pairs,prompts_offline=self._generate_samples_offline(
         iterations=iterations,
         batch_size=offpolicy_batch_size,
-        n=temp
         ) 
-        # prompts_offline=[]
-        # off_samples, off_prompt_image_pairs=self._generate_samples(
-        # iterations=iterations,
-        # batch_size=offpolicy_batch_size,
-        # ) 
                         
         if self.config.reward_function_usage:
             on_samples, on_prompt_image_pairs= self._generate_samples(
@@ -437,9 +416,7 @@ class DDPOTrainer(BaseTrainer):
             batch_size=onpolicy_batch_size,
         )
         else:  
-            # prompts=prompts_offline[:onpolicy_batch_size]
-            prompts=[prompts_offline[0] for i in range(onpolicy_batch_size)]
-
+            prompts=prompts_offline[:onpolicy_batch_size]
 
             on_samples, on_prompt_image_pairs= self._generate_samples_onpolicy(
             iterations=iterations,
@@ -529,73 +506,7 @@ class DDPOTrainer(BaseTrainer):
 
         return samples, prompt_image_pairs
 
-
-    def _generate_samples_offline_valid(self, batch_size,n):
-        """
-        Generate samples from the model
-
-        Args:
-            iterations (int): Number of iterations to generate samples for
-            batch_size (int): Batch size to use for sampling
-
-        Returns:
-            samples (List[Dict[str, torch.Tensor]]), prompt_image_pairs (List[List[Any]])
-        """
-
-        samples = []
-        prompt_image_pairs = []
-        if batch_size==0:
-            return samples, prompt_image_pairs,[]
-        self.sd_pipeline.unet.eval()
-
-        sample_neg_prompt_embeds = self.neg_prompt_embed.repeat(batch_size, 1, 1)
-   
-        
-
-        prompts, prompt_metadata = zip(*[self.prompt_fn() for _ in range(batch_size)])
-        images_offline,scores_offline,prompts,_,img_name=n[0],n[1],n[2],n[3],n[4]
-        print(prompts)
-
-        if self.config.reward_function_usage:
-            prompts, prompt_metadata = zip(*[self.prompt_fn() for _ in range(batch_size)])
-        else:
-            prompt_metadata=tuple([{} for i in range(batch_size)])
-
-
-        prompt_ids = self.sd_pipeline.tokenizer(
-            prompts,
-            return_tensors="pt",
-            padding="max_length",
-            truncation=True,
-            max_length=self.sd_pipeline.tokenizer.model_max_length,
-        ).input_ids.to(self.accelerator.device)
-        prompt_embeds = self.sd_pipeline.text_encoder(prompt_ids)[0]
-
-        with self.autocast():
-
-            sd_output = self.sd_pipeline.call_offline(
-                images_offline=images_offline,
-                prompt_embeds=prompt_embeds,
-                negative_prompt_embeds=sample_neg_prompt_embeds,
-                num_inference_steps=self.config.sample_num_steps,
-                guidance_scale=self.config.sample_guidance_scale,
-                eta=self.config.sample_eta,
-                output_type="pt",
-                height=self.config.resolution,width=self.config.resolution,
-
-            )
-
-            images = sd_output.images
-            latents = sd_output.latents
-            log_probs = sd_output.log_probs
-
-        log_probs = torch.stack(log_probs, dim=1)  # (batch_size, num_steps, 1)
-        res=float(torch.sum(log_probs))
-           
-        return res
-    
-
-    def _generate_samples_offline(self, iterations, batch_size,n):
+    def _generate_samples_offline(self, iterations, batch_size):
         """
         Generate samples from the model
 
@@ -618,26 +529,12 @@ class DDPOTrainer(BaseTrainer):
         
 
         for _ in range(iterations):
-            # n=next(iter(self.dataloader))
-
-            prompts, prompt_metadata = zip(*[self.prompt_fn() for _ in range(batch_size)])
-            print(prompts)
+            n=next(iter(self.dataloader))
             images_offline,scores_offline,prompts,_,img_name=n[0],n[1],n[2],n[3],n[4]
-            print(prompts)
-
             if self.config.reward_function_usage:
                 prompts, prompt_metadata = zip(*[self.prompt_fn() for _ in range(batch_size)])
             else:
                 prompt_metadata=tuple([{} for i in range(batch_size)])
-
-            # prompt_ids = self.sd_pipeline.tokenizer(
-            #     prompts,
-            #     return_tensors="pt",
-            #     padding="max_length",
-            #     truncation=True,
-            #     max_length=self.sd_pipeline.tokenizer.model_max_length,
-            # ).input_ids.to(self.accelerator.device)
-            # prompt_embeds = self.sd_pipeline.text_encoder(prompt_ids)[0]
 
             prompt_ids = self.sd_pipeline.tokenizer(
                 prompts,
@@ -674,6 +571,7 @@ class DDPOTrainer(BaseTrainer):
 
             
             print(f'******  ddpotrainer timesteps shape {timesteps.shape}')
+            print(f'*******  log_probs shape {log_probs.shape}')
            
            
             # latents phải từ noise đến ảnh
@@ -770,7 +668,6 @@ class DDPOTrainer(BaseTrainer):
 
             log_prob = scheduler_step_output.log_probs
 
-
         advantages = torch.clamp(
             advantages,
             -self.config.train_adv_clip_max,
@@ -779,12 +676,14 @@ class DDPOTrainer(BaseTrainer):
 
         ratio = torch.exp(log_prob - log_probs)
         print(f'loss fn   ---- ratio= {ratio}')
-        print(f'loss fn   ---- log_prob= {log_prob}  log_probs{log_probs} ')
 
+        print(f'loss fn   ---- ratio= {ratio}')
         print(f'timestep   ---- = {timesteps}')
         print(f'advantages   ---- = {advantages}')
 
 
+        if float(ratio)<0.5:
+            print("debug")
 
         loss = self.loss(advantages, self.config.train_clip_range, ratio)
 
@@ -850,7 +749,6 @@ class DDPOTrainer(BaseTrainer):
             global_step (int): The updated global step
         """
         info = defaultdict(list)
-        pr=False
         for _i, sample in enumerate(batched_samples):
             if self.config.train_cfg:
                 # concat negative prompts to sample prompts to avoid two forward passes
@@ -859,20 +757,7 @@ class DDPOTrainer(BaseTrainer):
                 embeds = sample["prompt_embeds"]
 
             for j in range(self.num_train_timesteps):
-                pr=False
-                if int(sample["timesteps"][:, j])<5:
-                    pr=True
-                # if sample["latents"][:, j]!=torch.Size([self.config.train_batch_size,4,int(self.config.resolution/8)]):
-                #     raise Exception("bug","wrong Size latents")
-                # if sample["next_latents"][:, j]!=torch.Size([self.config.train_batch_size,4,int(self.config.resolution/8)]):
-                #     raise Exception("bug","wrong Size next_latents")
-
                 with self.accelerator.accumulate(self.sd_pipeline.unet):
-                    if pr:
-                        temp=sample["latents"][:, j]
-                        print(f" sample latents {temp}")
-                        temp=sample["next_latents"][:, j]
-                        print(f" sample next_latents  {temp}")
                     loss, approx_kl, clipfrac = self.calculate_loss(
                         sample["latents"][:, j],
                         sample["timesteps"][:, j],
