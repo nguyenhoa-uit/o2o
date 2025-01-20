@@ -175,29 +175,29 @@ def _left_broadcast(input_tensor, shape):
 
 
 def _get_variance(self, timestep, prev_timestep):
-    alpha_prod_t = torch.gather(self.alphas_cumprod, 0, timestep.cpu()).to(timestep.device)
+    alpha_prod_t = torch.gather(self.alphas_cumprod.to(timestep.device), 0, timestep).to(timestep.device)
     alpha_prod_t_prev = torch.where(
-        prev_timestep.cpu() >= 0,
-        self.alphas_cumprod.gather(0, prev_timestep.cpu()),
-        self.final_alpha_cumprod,
+        prev_timestep >= 0,
+        self.alphas_cumprod.to(timestep.device).gather(0, prev_timestep),
+        self.final_alpha_cumprod.to(timestep.device),
     ).to(timestep.device)
     beta_prod_t = 1 - alpha_prod_t
     beta_prod_t_prev = 1 - alpha_prod_t_prev
 
     variance = (beta_prod_t_prev / beta_prod_t) * (1 - alpha_prod_t / alpha_prod_t_prev)
 
-    return variance
+    return variance.to(timestep.device)
 
 
 def scheduler_step(
     self,
-    model_output: torch.FloatTensor,
+    noise_pred: torch.FloatTensor,
     timestep: int,
-    sample: torch.FloatTensor,
+    x_t: torch.FloatTensor,
     eta: float = 0.0,
     use_clipped_model_output: bool = False,
     generator=None,
-    prev_sample: Optional[torch.FloatTensor] = None,
+    x_t_1: Optional[torch.FloatTensor] = None,
 ) -> DDPOSchedulerOutput:
     """
 
@@ -228,44 +228,34 @@ def scheduler_step(
             "Number of inference steps is 'None', you need to run 'set_timesteps' after creating the scheduler"
         )
 
-    # See formulas (12) and (16) of DDIM paper https://huggingface.co/papers/2010.02502
-    # Ideally, read DDIM paper in-detail understanding
 
-    # Notation (<variable name> -> <name in paper>
-    # - pred_noise_t -> e_theta(x_t, t)
-    # - pred_original_sample -> f_theta(x_t, t) or x_0
-    # - std_dev_t -> sigma_t
-    # - eta -> η
-    # - pred_sample_direction -> "direction pointing to x_t"
-    # - pred_prev_sample -> "x_t-1"
-    # 1. get previous step value (=t-1)
     prev_timestep = timestep - self.config.num_train_timesteps // self.num_inference_steps
     # to prevent OOB on gather
-    prev_timestep = torch.clamp(prev_timestep, 0, self.config.num_train_timesteps - 1)
+    prev_timestep = torch.clamp(prev_timestep, 0, self.config.num_train_timesteps - 1).to(x_t.device)
 
     # 2. compute alphas, betas
-    alpha_prod_t = self.alphas_cumprod.gather(0, timestep.cpu())
+    alpha_prod_t = self.alphas_cumprod.to(x_t.device).gather(0, timestep)
     alpha_prod_t_prev = torch.where(
-        prev_timestep.cpu() >= 0,
-        self.alphas_cumprod.gather(0, prev_timestep.cpu()),
-        self.final_alpha_cumprod,
+        prev_timestep >= 0,
+        self.alphas_cumprod.to(x_t.device).gather(0, prev_timestep),
+        self.final_alpha_cumprod.to(x_t.device),
     )
-    alpha_prod_t = _left_broadcast(alpha_prod_t, sample.shape).to(sample.device)
-    alpha_prod_t_prev = _left_broadcast(alpha_prod_t_prev, sample.shape).to(sample.device)
+    alpha_prod_t = _left_broadcast(alpha_prod_t, x_t.shape).to(x_t.device)
+    alpha_prod_t_prev = _left_broadcast(alpha_prod_t_prev, x_t.shape).to(x_t.device)
 
     beta_prod_t = 1 - alpha_prod_t
 
     # 3. compute predicted original sample from predicted noise also called
     # "predicted x_0" of formula (12) from https://huggingface.co/papers/2010.02502
     if self.config.prediction_type == "epsilon":
-        pred_original_sample = (sample - beta_prod_t ** (0.5) * model_output) / alpha_prod_t ** (0.5)
-        pred_epsilon = model_output
+        pred_original_sample = (x_t - beta_prod_t ** (0.5) * noise_pred) / alpha_prod_t ** (0.5)
+        pred_epsilon = noise_pred
     elif self.config.prediction_type == "sample":
-        pred_original_sample = model_output
-        pred_epsilon = (sample - alpha_prod_t ** (0.5) * pred_original_sample) / beta_prod_t ** (0.5)
+        pred_original_sample = noise_pred
+        pred_epsilon = (x_t - alpha_prod_t ** (0.5) * pred_original_sample) / beta_prod_t ** (0.5)
     elif self.config.prediction_type == "v_prediction":
-        pred_original_sample = (alpha_prod_t**0.5) * sample - (beta_prod_t**0.5) * model_output
-        pred_epsilon = (alpha_prod_t**0.5) * model_output + (beta_prod_t**0.5) * sample
+        pred_original_sample = (alpha_prod_t**0.5) * x_t - (beta_prod_t**0.5) * noise_pred
+        pred_epsilon = (alpha_prod_t**0.5) * noise_pred + (beta_prod_t**0.5) * x_t
     else:
         raise ValueError(
             f"prediction_type given as {self.config.prediction_type} must be one of `epsilon`, `sample`, or"
@@ -284,11 +274,11 @@ def scheduler_step(
     # σ_t = sqrt((1 − α_t−1)/(1 − α_t)) * sqrt(1 − α_t/α_t−1)
     variance = _get_variance(self, timestep, prev_timestep)
     std_dev_t = eta * variance ** (0.5)
-    std_dev_t = _left_broadcast(std_dev_t, sample.shape).to(sample.device)
+    std_dev_t = _left_broadcast(std_dev_t, x_t.shape).to(x_t.device)
 
     if use_clipped_model_output:
         # the pred_epsilon is always re-derived from the clipped x_0 in Glide
-        pred_epsilon = (sample - alpha_prod_t ** (0.5) * pred_original_sample) / beta_prod_t ** (0.5)
+        pred_epsilon = (x_t - alpha_prod_t ** (0.5) * pred_original_sample) / beta_prod_t ** (0.5)
 
     # 6. compute "direction pointing to x_t" of formula (12) from https://huggingface.co/papers/2010.02502
     pred_sample_direction = (1 - alpha_prod_t_prev - std_dev_t**2) ** (0.5) * pred_epsilon
@@ -296,38 +286,37 @@ def scheduler_step(
     # 7. compute x_t without "random noise" of formula (12) from https://huggingface.co/papers/2010.02502
     prev_sample_mean = alpha_prod_t_prev ** (0.5) * pred_original_sample + pred_sample_direction
 
-    if prev_sample is not None and generator is not None:
+    if x_t_1 is not None and generator is not None:
         raise ValueError(
             "Cannot pass both generator and prev_sample. Please make sure that either `generator` or"
             " `prev_sample` stays `None`."
         )
 
-    if prev_sample is None:
+    if x_t_1 is None:
         variance_noise = randn_tensor(
-            model_output.shape,
+            noise_pred.shape,
             generator=generator,
-            device=model_output.device,
-            dtype=model_output.dtype,
+            device=noise_pred.device,
+            dtype=noise_pred.dtype,
         )
-        prev_sample = prev_sample_mean + std_dev_t * variance_noise
+        x_t_1 = prev_sample_mean + std_dev_t * variance_noise
 
     # log prob of prev_sample given prev_sample_mean and std_dev_t
     log_prob = (
-        -((prev_sample.detach() - prev_sample_mean) ** 2) / (2 * (std_dev_t**2))
+        -((x_t_1.detach() - prev_sample_mean) ** 2) / (2 * (std_dev_t**2))
         - torch.log(std_dev_t)
         - torch.log(torch.sqrt(2 * torch.as_tensor(np.pi)))
     )
     # mean along all but batch dimension
     log_prob = log_prob.mean(dim=tuple(range(1, log_prob.ndim)))
 
-    return DDPOSchedulerOutput(prev_sample.type(sample.dtype), log_prob)
+    return DDPOSchedulerOutput(x_t_1.type(x_t.dtype), log_prob)
 
 
 # 1. The output type for call is different as the logprobs are now returned
 # 2. An extra method called `scheduler_step` is added which is used to constraint the scheduler output
 @torch.no_grad()
 def pipeline_step(
-    self_all,
     self,
     dataloader: DataLoader=None,
     prompt: Optional[Union[str, List[str]]] = None,
@@ -348,7 +337,6 @@ def pipeline_step(
     callback_steps: int = 1,
     cross_attention_kwargs: Optional[Dict[str, Any]] = None,
     guidance_rescale: float = 0.0,
-    show_image_log: bool =False,
 
 ):
     r"""
@@ -418,12 +406,8 @@ def pipeline_step(
     height = height or self.unet.config.sample_size * self.vae_scale_factor
     width = width or self.unet.config.sample_size * self.vae_scale_factor
 
+
     # 1. Check inputs. Raise error if not correct
-    if show_image_log:
-        prompt_embeds=prompt_embeds[:-1]
-        prompt_embeds_log=prompt_embeds[-1:]
-        negative_prompt_embeds=negative_prompt_embeds[:-1]
-        negative_prompt_embeds_log=negative_prompt_embeds[-1:]
 
     self.check_inputs(
         prompt,
@@ -434,17 +418,6 @@ def pipeline_step(
         prompt_embeds,
         negative_prompt_embeds,
     )
-    if show_image_log:
-        self.check_inputs(
-        None,
-        height,
-        width,
-        callback_steps,
-        None,
-        prompt_embeds_log,
-        negative_prompt_embeds_log,
-        )
-        batch_size_log=1
         
 
     # 2. Define call parameters
@@ -474,17 +447,6 @@ def pipeline_step(
         negative_prompt_embeds=negative_prompt_embeds,
         lora_scale=text_encoder_lora_scale,
     )
-    if show_image_log:
-        prompt_embeds_log = self._encode_prompt(
-        None,
-        device,
-        num_images_per_prompt,
-        do_classifier_free_guidance,
-        None,
-        prompt_embeds=prompt_embeds_log,
-        negative_prompt_embeds=negative_prompt_embeds_log,
-        lora_scale=text_encoder_lora_scale,
-    ) 
 
 
     # 4. Prepare timesteps
@@ -503,20 +465,6 @@ def pipeline_step(
         generator,
         latents,
     )
-    if show_image_log:
-        if self_all.save_sample[0]==None:
-            self_all.save_sample[0] = self.prepare_latents(
-            batch_size_log * num_images_per_prompt,
-            num_channels_latents,
-            height,
-            width,
-            prompt_embeds_log.dtype,
-            device,
-            generator,
-            None,
-            )
-        
-        latents_log=self_all.save_sample[0]
         
     
 
@@ -524,11 +472,8 @@ def pipeline_step(
 
     # 6. Denoising loop
     num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
-    if show_image_log:
-        latents_combine=torch.cat([latents,latents_log])
-    else:
-        latents_combine=latents
-    all_latents = [latents_combine]
+
+    all_latents = [latents]
     all_log_probs = []
 
 
@@ -537,9 +482,6 @@ def pipeline_step(
             # expand the latents if we are doing classifier free guidance
             latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
             latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
-            if show_image_log:
-                latent_model_input_log = torch.cat([latents_log] * 2) if do_classifier_free_guidance else latents_log
-                latent_model_input_log = self.scheduler.scale_model_input(latent_model_input_log, t)
 
             # predict the noise residual
             noise_pred = self.unet(
@@ -550,94 +492,63 @@ def pipeline_step(
                 return_dict=False,
             )[0]
 
-            if show_image_log:
-                noise_pred_log = self.unet(
-                latent_model_input_log,
-                t,
-                encoder_hidden_states=prompt_embeds_log,
-                cross_attention_kwargs=cross_attention_kwargs,
-                return_dict=False,
-                )[0]
 
             # perform guidance
             if do_classifier_free_guidance:
                 noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
                 noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
-                if show_image_log:
-                    noise_pred_uncond_log, noise_pred_text_log = noise_pred_log.chunk(2)
-                    noise_pred_log = noise_pred_uncond_log + guidance_scale * (noise_pred_text_log - noise_pred_uncond_log)
 
             if do_classifier_free_guidance and guidance_rescale > 0.0:
                 # Based on 3.4. in https://huggingface.co/papers/2305.08891
                 noise_pred = rescale_noise_cfg(noise_pred, noise_pred_text, guidance_rescale=guidance_rescale)
-                if show_image_log:
-                    noise_pred_log = rescale_noise_cfg(noise_pred_log, noise_pred_text_log, guidance_rescale=guidance_rescale)
 
 
             # compute the previous noisy sample x_t -> x_t-1
             scheduler_output = scheduler_step(self.scheduler, noise_pred, t, latents, eta)
             latents = scheduler_output.latents
             log_prob = scheduler_output.log_probs
-                
+            if i==int(num_inference_steps/2):
+                print(f"log_prob = {log_prob} \n")
 
-            if show_image_log:
-                scheduler_output_log = scheduler_step(self.scheduler, noise_pred_log, t, latents_log, eta)
-                latents_log = scheduler_output_log.latents
-                log_prob_log = scheduler_output_log.log_probs
-            if show_image_log:
-                latents_combine=torch.cat([latents,latents_log])
-                log_prob_combine=torch.cat([log_prob,log_prob_log])
-            else:
-                latents_combine=latents
-                log_prob_combine=log_prob
-            all_latents.append(latents_combine)
-            all_log_probs.append(log_prob_combine)
+                
+            all_latents.append(latents)
+            all_log_probs.append(log_prob)
             # call the callback, if provided
             if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
                 progress_bar.update()
                 if callback is not None and i % callback_steps == 0:
                     callback(i, t, latents)
 
+
     if not output_type == "latent":
         image = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False)[0]
         image, has_nsfw_concept = self.run_safety_checker(image, device, prompt_embeds.dtype)
-        if show_image_log:
-            image_log = self.vae.decode(latents_log / self.vae.config.scaling_factor, return_dict=False)[0]
-            image_log, has_nsfw_concept_log = self.run_safety_checker(image_log, device, prompt_embeds_log.dtype)
     else:
         image = latents
         has_nsfw_concept = None
-        if show_image_log:
-            image_log = latents_log
-            has_nsfw_concept_log = None
 
+
+    l1= get_latents_from_image(self,image,device)
     if has_nsfw_concept is None:
         do_denormalize = [True] * image.shape[0]
-        if show_image_log:
-            do_denormalize_log = [True] * image_log.shape[0]
-
     else:
         do_denormalize = [not has_nsfw for has_nsfw in has_nsfw_concept]
-        if show_image_log:
-            do_denormalize_log = [not has_nsfw for has_nsfw in has_nsfw_concept_log]
-
 
     image = self.image_processor.postprocess(image, output_type=output_type, do_denormalize=do_denormalize)
-    if show_image_log:
-        image_log = self.image_processor.postprocess(image_log, output_type=output_type, do_denormalize=do_denormalize_log)
 
-    if show_image_log:
-        image=torch.cat((image,image_log),dim=0)
+
+
 
     # Offload last model to CPU
     if hasattr(self, "final_offload_hook") and self.final_offload_hook is not None:
         self.final_offload_hook.offload()
 
+    print(f"all_log_probs = {all_log_probs} \n")
+
+
     return DDPOPipelineOutput(image, all_latents, all_log_probs)
 
-
-
-def forward_noising(latents, timesteps, scheduler,device):
+def add_double_noise(x_0, timestep, scheduler,device,generator):
     """
     Adds noise to the latent representation using a scheduler's noise schedule.
     
@@ -648,195 +559,79 @@ def forward_noising(latents, timesteps, scheduler,device):
     Returns:
     torch.Tensor: The noised latent representations.
     """
-    noise = torch.randn_like(latents,device=device)
-    alpha_t = scheduler.alphas_cumprod.to(device)[timesteps].sqrt()
+    # noise = torch.randn_like(latents_prev,device=device)
 
-
-    sigma_t = (1 - scheduler.alphas_cumprod.to(device)[timesteps]).to(device).sqrt()
-    temp1=alpha_t * latents.to(device)
-    temp2=sigma_t * noise
-    return temp1+temp2
+    noise_cum_t_1 = randn_tensor(
+            x_0.shape,
+            generator=generator,
+            device=device,
+            dtype=x_0.dtype,
+        )
+    noise_t = randn_tensor(
+            x_0.shape,
+            generator=generator,
+            device=device,
+            dtype=x_0.dtype,
+        )
     
+    if int(timestep<=2):
+        timestep_1=0
+    else:
+        timestep_1 = timestep - scheduler.config.num_train_timesteps // scheduler.num_inference_steps
 
-@torch.no_grad()
-def pipeline_step_offline(
-    self,
-    images_offline=None,
-    prompt: Optional[Union[str, List[str]]] = None,
-    height: Optional[int] = None,
-    width: Optional[int] = None,
-    num_inference_steps: int = 50,
-    guidance_scale: float = 7.5,
-    negative_prompt: Optional[Union[str, List[str]]] = None,
-    num_images_per_prompt: Optional[int] = 1,
-    eta: float = 0.0,
-    generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
-    latents: Optional[torch.FloatTensor] = None,
-    prompt_embeds: Optional[torch.FloatTensor] = None,
-    negative_prompt_embeds: Optional[torch.FloatTensor] = None,
-    output_type: Optional[str] = "pil",
-    return_dict: bool = True,
-    callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
-    callback_steps: int = 1,
-    cross_attention_kwargs: Optional[Dict[str, Any]] = None,
-    guidance_rescale: float = 0.0,
+    
+    # alpha_t_cum = self.alphas_cumprod.to(device)[timestep]
+    # alpha_t_cum_prev = self.alphas_cumprod.to(device)[timestep_1]
+    if timestep_1>0:
+        x_t_1=scheduler.add_noise(x_0,noise_cum_t_1,timestep_1)
+    else:
+        x_t_1=torch.tensor(x_0)
 
-):
-    r"""
+    alpha_t_step_cum=1
+    for st in range(timestep_1,timestep):
+        alpha_t_step_cum=alpha_t_step_cum*scheduler.alphas.to(device)[st]
+    root_alpha_t_step_cum= alpha_t_step_cum.sqrt()
+    root_beta_t_step_cum=(1-alpha_t_step_cum).sqrt()
+    x_t=root_alpha_t_step_cum * x_t_1+root_beta_t_step_cum * noise_t
+
+    return x_t,x_t_1
    
 
-    Returns:
-        `DDPOPipelineOutput`: The generated image, the predicted latents used to generate the image and the associated log probabilities
+def forward_noising(x_t_1, timestep, scheduler,device,generator):
     """
-
-    # 0. Default height and width to unet
-    height = height or self.unet.config.sample_size * self.vae_scale_factor
-    width = width or self.unet.config.sample_size * self.vae_scale_factor
-
-    # 1. Check inputs. Raise error if not correct
-    self.check_inputs(
-        prompt,
-        height,
-        width,
-        callback_steps,
-        negative_prompt,
-        prompt_embeds,
-        negative_prompt_embeds,
-    )
-
-    # 2. Define call parameters
-    if prompt is not None and isinstance(prompt, str):
-        batch_size = 1
-    elif prompt is not None and isinstance(prompt, list):
-        batch_size = len(prompt)
+    Adds noise to the latent representation using a scheduler's noise schedule.
+    
+    Args:
+    latents (torch.Tensor): The latent representations of the image.
+    timesteps (torch.Tensor): The timestep at which to add noise.
+    scheduler: The scheduler to determine the noise schedule.
+    Returns:
+    torch.Tensor: The noised latent representations.
+    """
+    # noise = torch.randn_like(latents_prev,device=device)
+    if int(timestep<=2):
+        timestep_1=0
     else:
-        batch_size = prompt_embeds.shape[0]
+        timestep_1 = timestep - scheduler.config.num_train_timesteps // scheduler.num_inference_steps
 
-    device = self._execution_device
-    # here `guidance_scale` is defined analog to the guidance weight `w` of equation (2)
-    # of the Imagen paper: https://huggingface.co/papers/2205.11487 . `guidance_scale = 1`
-    # corresponds to doing no classifier free guidance.
-    do_classifier_free_guidance = guidance_scale > 1.0
+    noise_t = randn_tensor(
+            x_t_1.shape,
+            generator=generator,
+            device=device,
+            dtype=x_t_1.dtype,
+        )
+    
+    alpha_t_step_cum=1
+    for st in range(timestep_1,timestep):
+        alpha_t_step_cum=alpha_t_step_cum*scheduler.alphas.to(device)[st]
+    root_alpha_t_step_cum= alpha_t_step_cum.sqrt()
+    root_beta_t_step_cum=(1-alpha_t_step_cum).sqrt()
 
-    # 3. Encode input prompt
-    text_encoder_lora_scale = cross_attention_kwargs.get("scale", None) if cross_attention_kwargs is not None else None
-    prompt_embeds = self._encode_prompt(
-        prompt,
-        device,
-        num_images_per_prompt,
-        do_classifier_free_guidance,
-        negative_prompt,
-        prompt_embeds=prompt_embeds,
-        negative_prompt_embeds=negative_prompt_embeds,
-        lora_scale=text_encoder_lora_scale,
-    )
+    x_t=root_alpha_t_step_cum * x_t_1+root_beta_t_step_cum * noise_t
 
-    # 4. Prepare timesteps
-    self.scheduler.set_timesteps(num_inference_steps, device=device)
-    timesteps = self.scheduler.timesteps
+    return x_t
+    
 
-    # 5. Prepare latent variables
-    num_channels_latents = self.unet.config.in_channels
-
-    images_offline=[images_offline[i].to(device,self.dtype).unsqueeze(0) for i in range(len(images_offline))]
-
-
-    # Encode the image into latent space using VAE
-    # latents_single = [self.vae.encode(i).latent_dist.sample() * self.vae.config.scaling_factor for i in images_offline]
-    latents_single = [self.vae.encode(i).latent_dist.sample() * self.vae.config.scaling_factor for i in images_offline]
-
-
-
-    # Log pipeline_step_offline latents shape model sd torch.Size([1, 4, 64, 64])
-
-    # print(f'Log pipeline_step_offline latents shape model sd {latents_single[0].shape}')
-    latents_noise_list=[torch.cat(latents_single,dim=0)]
-
-
-# def forward_noising(latents, timesteps_ix, scheduler,device):
-    with self.progress_bar(total=num_inference_steps) as progress_bar:
-        for i, step in enumerate(torch.flip(timesteps,dims=[0])):
-            latents_single=[forward_noising(latents_single[ix],torch.tensor([step]).to(device),self.scheduler,device) for ix in range(len(latents_single))]
-
-            latents_noise_list.append(torch.cat(latents_single,dim=0).to(device,self.dtype))
-
-    # Last element is no noise
-    latents_noise_list=latents_noise_list[::-1]
-
-
-    num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
-
-    all_latents_offline = [latents_noise_list[0]]
-    all_log_probs_offline = []
-
-    with self.progress_bar(total=num_inference_steps) as progress_bar:
-        for i, t in enumerate(timesteps):
-            latents=latents_noise_list[i]
-            latents_prev=latents_noise_list[i+1]
-            # expand the latents if we are doing classifier free guidance
-            latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
-            latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
-
-            # latent_model_input_prev = torch.cat([latents_prev] * 2) if do_classifier_free_guidance else latents_prev
-            # latent_model_input_prev = self.scheduler.scale_model_input(latent_model_input_prev, t)
-
-            # predict the noise residual
-            noise_pred = self.unet(
-                latent_model_input,
-                t,
-                encoder_hidden_states=prompt_embeds,
-                cross_attention_kwargs=cross_attention_kwargs,
-                return_dict=False,
-            )[0]
-
-            # perform guidance
-            if do_classifier_free_guidance:
-                noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-                noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
-
-            if do_classifier_free_guidance and guidance_rescale > 0.0:
-                # Based on 3.4. in https://huggingface.co/papers/2305.08891
-                noise_pred = rescale_noise_cfg(noise_pred, noise_pred_text, guidance_rescale=guidance_rescale)
-
-            # compute the previous noisy sample x_t -> x_t-1
-            scheduler_output = scheduler_step(self.scheduler, noise_pred, t, latents, eta,prev_sample=latents_prev)
-            latents = scheduler_output.latents
-            log_prob = scheduler_output.log_probs
-
-            all_latents_offline.append(latents_prev)
-            all_log_probs_offline.append(log_prob)
-
-            # call the callback, if provided
-            if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
-                progress_bar.update()
-                if callback is not None and i % callback_steps == 0:
-                    callback(i, t, latents)
-
-    if not output_type == "latent":
-        image = self.vae.decode(all_latents_offline[-5][-1:].to(device) / self.vae.config.scaling_factor, return_dict=False)[0]
-        image, has_nsfw_concept = self.run_safety_checker(image, device, prompt_embeds.dtype)
-    else:
-        image = latents
-        has_nsfw_concept = None
-
-
- 
-    if has_nsfw_concept is None:
-        do_denormalize = [True] * image.shape[0]
-    else:
-        do_denormalize = [not has_nsfw for has_nsfw in has_nsfw_concept]
-
-    image = self.image_processor.postprocess(image, output_type=output_type, do_denormalize=do_denormalize)
-
-    # Offload last model to CPU
-    if hasattr(self, "final_offload_hook") and self.final_offload_hook is not None:
-        self.final_offload_hook.offload()
-    # image_sample=image[:1]
-    # image=image[1:]
-    # all_latents_offline_sample=[i[:1] for i in all_latents_offline]
-    # all_latents_offline=[i[1:] for i in all_latents_offline]
-
-    return DDPOPipelineOutput(image, all_latents_offline, all_log_probs_offline)
 
 def pipeline_step_with_grad(
     pipeline,
@@ -1037,6 +832,7 @@ def pipeline_step_with_grad(
                     return_dict=False,
                 )[0]
 
+
             #  truncating backpropagation is critical for preventing overoptimization (https://huggingface.co/papers/2304.05977).
             if truncated_backprop:
                 # Randomized truncation randomizes the truncation process (https://huggingface.co/papers/2310.03739)
@@ -1097,6 +893,186 @@ def pipeline_step_with_grad(
     return DDPOPipelineOutput(image, all_latents, all_log_probs)
 
 
+def get_latents_from_image(self,image,device):
+     latents=self.vae.encode(image.to(device,self.dtype)).latent_dist.sample() * self.vae.config.scaling_factor
+     return latents
+
+@torch.no_grad()
+def pipeline_step_offline(
+    self,
+    images_offline=None,
+    prompt: Optional[Union[str, List[str]]] = None,
+    height: Optional[int] = None,
+    width: Optional[int] = None,
+    num_inference_steps: int = 50,
+    guidance_scale: float = 7.5,
+    negative_prompt: Optional[Union[str, List[str]]] = None,
+    num_images_per_prompt: Optional[int] = 1,
+    eta: float = 0.0,
+    generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
+    latents: Optional[torch.FloatTensor] = None,
+    prompt_embeds: Optional[torch.FloatTensor] = None,
+    negative_prompt_embeds: Optional[torch.FloatTensor] = None,
+    output_type: Optional[str] = "pil",
+    return_dict: bool = True,
+    callback: Optional[Callable[[int, int, torch.FloatTensor], None]] = None,
+    callback_steps: int = 1,
+    cross_attention_kwargs: Optional[Dict[str, Any]] = None,
+    guidance_rescale: float = 0.0,
+
+):
+    r"""
+   
+
+    Returns:
+        `DDPOPipelineOutput`: The generated image, the predicted latents used to generate the image and the associated log probabilities
+    """
+
+    # 0. Default height and width to unet
+    height = height or self.unet.config.sample_size * self.vae_scale_factor
+    width = width or self.unet.config.sample_size * self.vae_scale_factor
+
+    # 1. Check inputs. Raise error if not correct
+    self.check_inputs(
+        prompt,
+        height,
+        width,
+        callback_steps,
+        negative_prompt,
+        prompt_embeds,
+        negative_prompt_embeds,
+    )
+
+    # 2. Define call parameters
+    if prompt is not None and isinstance(prompt, str):
+        batch_size = 1
+    elif prompt is not None and isinstance(prompt, list):
+        batch_size = len(prompt)
+    else:
+        batch_size = prompt_embeds.shape[0]
+
+    device = self._execution_device
+    # here `guidance_scale` is defined analog to the guidance weight `w` of equation (2)
+    # of the Imagen paper: https://huggingface.co/papers/2205.11487 . `guidance_scale = 1`
+    # corresponds to doing no classifier free guidance.
+    do_classifier_free_guidance = guidance_scale > 1.0
+
+    # 3. Encode input prompt
+    text_encoder_lora_scale = cross_attention_kwargs.get("scale", None) if cross_attention_kwargs is not None else None
+    prompt_embeds = self._encode_prompt(
+        prompt,
+        device,
+        num_images_per_prompt,
+        do_classifier_free_guidance,
+        negative_prompt,
+        prompt_embeds=prompt_embeds,
+        negative_prompt_embeds=negative_prompt_embeds,
+        lora_scale=text_encoder_lora_scale,
+    )
+
+    # 4. Prepare timesteps
+    self.scheduler.set_timesteps(num_inference_steps, device=device)
+    timesteps = self.scheduler.timesteps
+
+    # 5. Prepare latent variables
+    num_channels_latents = self.unet.config.in_channels
+
+    # images_offline=[images_offline[i].to(device,self.dtype).unsqueeze(0) for i in range(len(images_offline))]
+    images_offline=[self.image_processor.preprocess(item.to(device,self.dtype),height=height,width=width,resize_mode='crop') for item in images_offline]
+
+    # Encode the image into latent space using VAE
+    latents_batch = [self.vae.encode(item).latent_dist.sample() * self.vae.config.scaling_factor for item in images_offline]
+
+    # print(f"latents after encode {latents_batch[-1]}")
+
+    latents_noise_list=[torch.cat(latents_batch,dim=0).to(device,self.dtype)]
+
+# def forward_noising(latents, timesteps_ix, scheduler,device):
+    with self.progress_bar(total=num_inference_steps) as progress_bar:
+        for i, step in enumerate(torch.flip(timesteps,dims=[0])):
+            latents_batch=[forward_noising(latents_batch[ix],torch.tensor([step]).to(device),self.scheduler,device,generator) for ix in range(len(latents_batch))]
+            latents_noise_list.append(torch.cat(latents_batch,dim=0).to(device,self.dtype))
+
+    # Last element is no noise
+    latents_noise_list=latents_noise_list[::-1]
+
+
+    num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
+
+    all_latents_offline = [latents_noise_list[0]]
+    all_log_probs_offline = []
+
+    with self.progress_bar(total=num_inference_steps) as progress_bar:
+        for i, t in enumerate(timesteps):
+            latents=latents_noise_list[i]
+            latents_prev=latents_noise_list[i+1]
+            # expand the latents if we are doing classifier free guidance
+            latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
+            latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
+
+    
+            # predict the noise residual
+            noise_pred = self.unet(
+                latent_model_input,
+                t,
+                encoder_hidden_states=prompt_embeds,
+                cross_attention_kwargs=cross_attention_kwargs,
+                return_dict=False,
+            )[0]
+
+
+            # perform guidance
+            if do_classifier_free_guidance:
+                noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+                noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+
+            if do_classifier_free_guidance and guidance_rescale > 0.0:
+                # Based on 3.4. in https://huggingface.co/papers/2305.08891
+                noise_pred = rescale_noise_cfg(noise_pred, noise_pred_text, guidance_rescale=guidance_rescale)
+
+            # compute the previous noisy sample x_t -> x_t-1
+            scheduler_output = scheduler_step(self.scheduler, noise_pred, t, latents, eta,x_t_1=latents_prev)
+            
+
+            log_prob = scheduler_output.log_probs
+     
+            latents = scheduler_output.latents
+
+            all_latents_offline.append(latents_prev)
+            all_log_probs_offline.append(log_prob)
+
+            # call the callback, if provided
+            if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
+                progress_bar.update()
+                if callback is not None and i % callback_steps == 0:
+                    callback(i, t, latents)
+    # print(f" offline final latents {latents}" )
+
+    if not output_type == "latent":
+        image = self.vae.decode(latents.to(device) / self.vae.config.scaling_factor, return_dict=False)[0]
+        image, has_nsfw_concept = self.run_safety_checker(image, device, prompt_embeds.dtype)
+    else:
+        image = latents
+        has_nsfw_concept = None
+
+
+    if has_nsfw_concept is None:
+        do_denormalize = [True] * image.shape[0]
+    else:
+        do_denormalize = [not has_nsfw for has_nsfw in has_nsfw_concept]
+
+    image = self.image_processor.postprocess(image, output_type=output_type, do_denormalize=do_denormalize)
+
+    # Offload last model to CPU
+    if hasattr(self, "final_offload_hook") and self.final_offload_hook is not None:
+        self.final_offload_hook.offload()
+
+    print(f"all_log_probs_offline = {all_log_probs_offline} \n")
+
+
+    return DDPOPipelineOutput(image, all_latents_offline, all_log_probs_offline)
+
+
 class DefaultDDPOStableDiffusionPipeline(DDPOStableDiffusionPipeline):
     def __init__(self, pretrained_model_name: str, *, pretrained_model_revision: str = "main", use_lora: bool = True):
         self.sd_pipeline = StableDiffusionPipeline.from_pretrained(
@@ -1131,7 +1107,7 @@ class DefaultDDPOStableDiffusionPipeline(DDPOStableDiffusionPipeline):
         self.save_sample=[None]
 
     def __call__(self, *args, **kwargs) -> DDPOPipelineOutput:
-        return pipeline_step(self,self.sd_pipeline, *args, **kwargs)
+        return pipeline_step(self.sd_pipeline, *args, **kwargs)
 
     def rgb_with_grad(self, *args, **kwargs) -> DDPOPipelineOutput:
         return pipeline_step_with_grad(self.sd_pipeline, *args, **kwargs)

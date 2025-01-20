@@ -31,72 +31,84 @@ class DDPOConfig:
     logdir: str = "logs"
     """Top-level logging directory for checkpoint saving."""
 
+    num_checkpoint_limit: int = 10
+    """Number of checkpoints to keep before overwriting old ones."""
     # tracker_project_name: str = "stable_diffusion_training"
     tracker_project_name: str = "Dev"
     """Name of project to use for tracking"""
 
 
-
-
-
-
-
-    seed: int = 6789  
+    # train_learning_rate: float = 3e-4  
+    train_learning_rate: float = 3e-4
+    """Learning rate."""
+    seed: int = 0  
     """Seed value for random generations"""
-    show_image_log: bool=False
-    # """ Show sample image in log tracker (wandb)"""
-
-    show_image_log_freq: int=2
-    # """ Show sample image in log tracker (wandb)"""
-    resolution:int =512
-    "Image square size"
     global_step: int=0
     """Global step, using with checkpoint save folder"""
-    train_mode: str = "contrastive"
-    """ offpolicy or contrastive or other. Train mode"""
-    positive_reward: float=100.00
+    high_reward: float=100.00
     """Reward for a sample picture from dataset """
-    negative_reward: float=50.00
+    low_reward: float=50.00
     """Reward for a generated picture from model """
 
-    data_folder: str = './inputs/An_extremely_Asian_girl_verlarge/'
-    """Top-level logging directory for checkpoint saving."""
-    # hyperparameters
-    num_epochs: int =80
-    load_dataset: str='huggingface'
-    """load from huggingface or local"""
+    resolution:int =768
 
+    "Image square size"
+    reward_function_usage: bool = True
+    """ Using pretrained model to get reward, otherwise, use image with reward in advance"""
 
-    resume_from: Optional[str] = "./outputs/checkpoints/checkpoint_1"
-    resume_from: Optional[str] = ""
-    """== checkpoin from // Resume training from a checkpoint."""
+    valid_batch_size: int=6
+    """ Validation dataset batch size"""
+    valid_size:int=50
+    dataset_index=3
+
+    sample_batch_size: int = 6
+    """Batch size (per GPU!) to use for sampling."""
+    offpolicy_sample_batch_size: int = 3
+    """Batch size for offpolicy from dataset - not larger than sample_batch_size"""
+
+    train_batch_size: int = 6
+    """Batch size (per GPU!) to use for training."""
+
+    train_num_inner_epochs: int = 1
+    """Number of inner epochs per outer epoch."""
+
 
 
     sample_num_steps: int = 50
     """Number of sampler inference steps."""
-    train_batch_size: int = 1
-    """Batch size (per GPU!) to use for training."""
-    train_num_inner_epochs: int = 1
-    """Number of inner epochs per outer epoch."""
-    sample_batch_size: int = 4
-    """Batch size (per GPU!) to use for sampling."""
-    offpolicy_sample_batch_size: int = 2
-    """Batch size for offpolicy from dataset - not larger than sample_batch_size"""
     sample_num_batches_per_epoch: int = 1
     """Number of batches to sample per epoch."""
     # resume_from: Optional[str] = "./outputs/checkpoint/checkpoints/checkpoint_20"
-    train_learning_rate: float = 3e-4  
-    # train_learning_rate: float = 1e-4
-    """Learning rate."""
 
 
+    # train_mode: str = "contrastive"
+    # """ offpolicy or contrastive or other. Train mode"""
+
+   
+
+    
+    """Top-level logging directory for checkpoint saving."""
+    # hyperparameters
 
 
+    num_epochs: int =1000
+    resume_from: Optional[str] = "./outputs/checkpoints/checkpoint_0"
+    resume_from: Optional[str] = ""
+    """== checkpoin from // Resume training from a checkpoint."""
 
-    save_freq: int = 10
+    save_freq: int = 20
     """Number of epochs between saving model checkpoints."""
-    num_checkpoint_limit: int = 10
-    """Number of checkpoints to keep before overwriting old ones."""
+
+    huggingface_note: str = "test_only"
+    """Save model note."""
+
+    pass_images:int=0
+    """Dataset passing using with checkpoint resuming"""
+
+    artistic_log_on: bool= True
+    """Show artistic score on wandb"""
+
+
 
 
 # DEFAULT NO CHANGE
@@ -164,3 +176,8 @@ class DDPOConfig:
                 "You need to install bitsandbytes to use 8bit Adam. "
                 "You can install it with `pip install bitsandbytes`."
             )
+        # if self.sample_batch_size>2*self.offpolicy_sample_batch_size and not self.reward_function_usage:
+        #     raise ImportError(
+        #         "offpolicy_sample_batch_size should be large than or equal half of sample_batch_size"
+        #     )
+
