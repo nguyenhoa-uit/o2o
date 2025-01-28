@@ -364,8 +364,8 @@ class DDPOTrainer(BaseTrainer):
                 raise ValueError(
                     "Optimization step should have been performed by this point. Please check calculated gradient accumulation settings."
                 )
-  
-        log_valid_value=self.compute_valid_value(batch_size=self.config.valid_batch_size)
+        log_valid_value=5
+        # log_valid_value=self.compute_valid_value(batch_size=self.config.valid_batch_size)
         valid_value=math.exp(valid_value)
         self.accelerator.log(
             {
@@ -433,11 +433,6 @@ class DDPOTrainer(BaseTrainer):
         batch_size=offpolicy_batch_size,
         n=temp
         ) 
-        # prompts_offline=[]
-        # off_samples, off_prompt_image_pairs=self._generate_samples(
-        # iterations=iterations,
-        # batch_size=offpolicy_batch_size,
-        # ) 
                         
         if self.config.reward_function_usage:
             on_samples, on_prompt_image_pairs= self._generate_samples(
@@ -445,7 +440,6 @@ class DDPOTrainer(BaseTrainer):
             batch_size=onpolicy_batch_size,
         )
         else:  
-            # prompts=prompts_offline[:onpolicy_batch_size]
             prompts=[prompts_offline[0] for i in range(onpolicy_batch_size)]
 
 
@@ -517,8 +511,6 @@ class DDPOTrainer(BaseTrainer):
             timesteps = self.sd_pipeline.scheduler.timesteps.repeat(batch_size, 1)  # (batch_size, num_steps)
             rewards=[self.config.low_reward for _ in range(batch_size)]
             rewards=torch.as_tensor(rewards).unsqueeze(dim=1)
-
-            # rewards=torch.as_tensor(rewards).unsqueeze(dim=1).repeat(1,self.config.sample_num_steps)
 
             samples.append(
                 {
@@ -677,16 +669,17 @@ class DDPOTrainer(BaseTrainer):
                 )
 
                 images = sd_output.images
-                latents = sd_output.latents
+                latents = sd_output.latents[0]
+                next_latents=sd_output.latents[1]
                 log_probs = sd_output.log_probs
 
             latents = torch.stack(latents, dim=1)  # (batch_size, num_steps + 1, ...)
+            next_latents=torch.stack(next_latents, dim=1)
             log_probs = torch.stack(log_probs, dim=1)  # (batch_size, num_steps, 1)
             timesteps = self.sd_pipeline.scheduler.timesteps.repeat(batch_size, 1)  # (batch_size, num_steps)
             # scores_offline=torch.as_tensor(scores_offline).unsqueeze(dim=1).repeat(1,self.config.sample_num_steps)
             scores_offline=torch.as_tensor(scores_offline).unsqueeze(dim=1)
 
-            
             print(f'******  ddpotrainer timesteps shape {timesteps.shape}')
            
            
@@ -696,8 +689,8 @@ class DDPOTrainer(BaseTrainer):
                     "prompt_ids": prompt_ids,
                     "prompt_embeds": prompt_embeds,
                     "timesteps": timesteps,
-                    "latents": latents[:, :-1],  # each entry is the latent before timestep t
-                    "next_latents": latents[:, 1:],  # each entry is the latent after timestep t
+                    "latents": latents,  # each entry is the latent before timestep t
+                    "next_latents": next_latents,  # each entry is the latent after timestep t
                     "log_probs": log_probs,
                     "negative_prompt_embeds": sample_neg_prompt_embeds,
                     "rewards": scores_offline,
@@ -874,10 +867,6 @@ class DDPOTrainer(BaseTrainer):
 
             for j in range(self.num_train_timesteps):
         
-                # if sample["latents"][:, j]!=torch.Size([self.config.train_batch_size,4,int(self.config.resolution/8)]):
-                #     raise Exception("bug","wrong Size latents")
-                # if sample["next_latents"][:, j]!=torch.Size([self.config.train_batch_size,4,int(self.config.resolution/8)]):
-                #     raise Exception("bug","wrong Size next_latents")
 
                 with self.accelerator.accumulate(self.sd_pipeline.unet):
                     loss, approx_kl, clipfrac = self.calculate_loss(
@@ -1063,75 +1052,6 @@ class DDPOTrainer(BaseTrainer):
 
         return samples, prompt_image_pairs
 
-
-
-    def _train_batched_samples_bk(self, inner_epoch, epoch, global_step, batched_samples):
-        """
-        Train on a batch of samples. Main training segment
-
-        Args:
-            inner_epoch (int): The current inner epoch
-            epoch (int): The current epoch
-            global_step (int): The current global step
-            batched_samples (List[Dict[str, torch.Tensor]]): The batched samples to train on
-
-        Side Effects:
-            - Model weights are updated
-            - Logs the statistics to the accelerator trackers.
-
-        Returns:
-            global_step (int): The updated global step
-        """
-        info = defaultdict(list)
-        for _i, sample in enumerate(batched_samples):
-            a=sample["advantages"]
-            print(f"---????????-----advantages {a}")
-            if self.config.train_cfg:
-                # concat negative prompts to sample prompts to avoid two forward passes
-                embeds = torch.cat([sample["negative_prompt_embeds"], sample["prompt_embeds"]])
-            else:
-                embeds = sample["prompt_embeds"]
-
-            for j in range(self.num_train_timesteps):
-                # if len(sample["advantages"].shape)==1:
-                #     a=sample["advantages"][:]
-                # else:
-                #     a=sample["advantages"][:, j]
-                print(f"---num train timestep-----advantages {a}")
-                with self.accelerator.accumulate(self.sd_pipeline.unet):
-                    loss, approx_kl, clipfrac = self.calculate_loss(
-                        sample["latents"][:, j],
-                        sample["timesteps"][:, j],
-                        sample["next_latents"][:, j],
-                        sample["log_probs"][:, j],
-                        a,
-                        embeds,
-                    )
-                    info["approx_kl"].append(approx_kl)
-                    info["clipfrac"].append(clipfrac)
-                    info["loss"].append(loss)
-
-                    self.accelerator.backward(loss)
-                    if self.accelerator.sync_gradients:
-                        self.accelerator.clip_grad_norm_(
-                            self.trainable_layers.parameters()
-                            if not isinstance(self.trainable_layers, list)
-                            else self.trainable_layers,
-                            self.config.train_max_grad_norm,
-                        )
-                    self.optimizer.step()
-                    self.optimizer.zero_grad()
-
-                # Checks if the accelerator has performed an optimization step behind the scenes
-                if self.accelerator.sync_gradients:
-                    # log training-related stuff
-                    info = {k: torch.mean(torch.stack(v)) for k, v in info.items()}
-                    info = self.accelerator.reduce(info, reduction="mean")
-                    info.update({"epoch": epoch, "inner_epoch": inner_epoch})
-                    self.accelerator.log(info, step=global_step)
-                    global_step += 1
-                    info = defaultdict(list)
-        return global_step
 
     def _config_check(self) -> Tuple[bool, str]:
         samples_per_epoch = (

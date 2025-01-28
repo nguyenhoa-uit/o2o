@@ -402,8 +402,9 @@ def collate_fn(batch):
 @dataclass
 class ScriptArguments:
 # "runwayml/stable-diffusion-v1-5"
+# 
     pretrained_model: str = field(
-        default="stabilityai/stable-diffusion-2-1", metadata={"help": "the pretrained model to use"}
+        default="runwayml/stable-diffusion-v1-5", metadata={"help": "the pretrained model to use"}
     )
   
     pretrained_revision: str = field(default="main", metadata={"help": "the pretrained model revision to use"})
@@ -533,8 +534,8 @@ if __name__ == "__main__":
     off_batch=ddpo_config.offpolicy_sample_batch_size
     name=f"dataset_index{ddpo_config.dataset_index}_{model_note}_offbatch{off_batch}_e{num_epochs}"
     
-    trainer.save_pretrained(name)
+    trainer.save_pretrained(model_note)
     if (args.hf_hub_model_id==""):
         print("Not load to github")
     else:
-      trainer.push_to_hub(name)
+      trainer.push_to_hub(model_note)

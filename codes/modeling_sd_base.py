@@ -594,7 +594,7 @@ def add_double_noise(x_0, timestep, scheduler,device,generator):
     root_beta_t_step_cum=(1-alpha_t_step_cum).sqrt()
     x_t=root_alpha_t_step_cum * x_t_1+root_beta_t_step_cum * noise_t
 
-    return x_t,x_t_1
+    return [x_t,x_t_1]
    
 
 def forward_noising(x_t_1, timestep, scheduler,device,generator):
@@ -978,34 +978,45 @@ def pipeline_step_offline(
     num_channels_latents = self.unet.config.in_channels
 
     # images_offline=[images_offline[i].to(device,self.dtype).unsqueeze(0) for i in range(len(images_offline))]
+    # [torch.Size([1, 3, 768, 768])]
     images_offline=[self.image_processor.preprocess(item.to(device,self.dtype),height=height,width=width,resize_mode='crop') for item in images_offline]
 
-    # Encode the image into latent space using VAE
+    # Encode the image into latent space using VAE X0
+#    latents_batch[0].shape=torch.Size([1, 4, 96, 96])
     latents_batch = [self.vae.encode(item).latent_dist.sample() * self.vae.config.scaling_factor for item in images_offline]
 
-    # print(f"latents after encode {latents_batch[-1]}")
+# [0]=torch.Size([1, 4, 96, 96])
+    # latents_noise_list=[torch.cat(latents_batch,dim=0).to(device,self.dtype)]
+    x_t_list=[]
+    x_t_1_list=[]
 
-    latents_noise_list=[torch.cat(latents_batch,dim=0).to(device,self.dtype)]
-
-# def forward_noising(latents, timesteps_ix, scheduler,device):
+# producing trajectory XT:0
     with self.progress_bar(total=num_inference_steps) as progress_bar:
-        for i, step in enumerate(torch.flip(timesteps,dims=[0])):
-            latents_batch=[forward_noising(latents_batch[ix],torch.tensor([step]).to(device),self.scheduler,device,generator) for ix in range(len(latents_batch))]
-            latents_noise_list.append(torch.cat(latents_batch,dim=0).to(device,self.dtype))
+        for i, step in enumerate(timesteps):
+            # latents_batch=[forward_noising(latents_batch[ix],torch.tensor([step]).to(device),self.scheduler,device,generator) for ix in range(len(latents_batch))]
+            list=[add_double_noise(latents_batch[ix],torch.tensor([step]).to(device),self.scheduler,device,generator) for ix in range(len(latents_batch))]
+            x_t_list.append(torch.cat([list[ix][0] for ix in range(len(list))],dim=0).to(device,self.dtype))
+            x_t_1_list.append(torch.cat([list[ix][1] for ix in range(len(list))],dim=0).to(device,self.dtype))
 
-    # Last element is no noise
-    latents_noise_list=latents_noise_list[::-1]
+            # latents_noise_list.append(torch.cat(latents_batch,dim=0).to(device,self.dtype))
+
+    # Reverse X0:T to XT:0 - len=51
+    # latents_noise_list=latents_noise_list[::-1]
+    # x_t_1_list=x_t_1_list[::-1]
+    # x_t_list=x_t_list[::-1]
 
 
     num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
 
-    all_latents_offline = [latents_noise_list[0]]
+    # all_latents_offline = [latents_noise_list[0]]
+    # all_latents_offline=[]
+    # all_latents_prev_offline=[]
     all_log_probs_offline = []
 
     with self.progress_bar(total=num_inference_steps) as progress_bar:
         for i, t in enumerate(timesteps):
-            latents=latents_noise_list[i]
-            latents_prev=latents_noise_list[i+1]
+            latents=x_t_list[i]
+            latents_prev=x_t_1_list[i]
             # expand the latents if we are doing classifier free guidance
             latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
             latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
@@ -1020,7 +1031,6 @@ def pipeline_step_offline(
                 return_dict=False,
             )[0]
 
-
             # perform guidance
             if do_classifier_free_guidance:
                 noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
@@ -1033,12 +1043,10 @@ def pipeline_step_offline(
             # compute the previous noisy sample x_t -> x_t-1
             scheduler_output = scheduler_step(self.scheduler, noise_pred, t, latents, eta,x_t_1=latents_prev)
             
-
             log_prob = scheduler_output.log_probs
-     
             latents = scheduler_output.latents
 
-            all_latents_offline.append(latents_prev)
+            # all_latents_offline.append(latents_prev)
             all_log_probs_offline.append(log_prob)
 
             # call the callback, if provided
@@ -1055,7 +1063,6 @@ def pipeline_step_offline(
         image = latents
         has_nsfw_concept = None
 
-
     if has_nsfw_concept is None:
         do_denormalize = [True] * image.shape[0]
     else:
@@ -1066,11 +1073,8 @@ def pipeline_step_offline(
     # Offload last model to CPU
     if hasattr(self, "final_offload_hook") and self.final_offload_hook is not None:
         self.final_offload_hook.offload()
-
     print(f"all_log_probs_offline = {all_log_probs_offline} \n")
-
-
-    return DDPOPipelineOutput(image, all_latents_offline, all_log_probs_offline)
+    return DDPOPipelineOutput(image, [x_t_list,x_t_1_list], all_log_probs_offline)
 
 
 class DefaultDDPOStableDiffusionPipeline(DDPOStableDiffusionPipeline):

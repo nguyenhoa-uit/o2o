@@ -50,23 +50,23 @@ class DDPOConfig:
     low_reward: float=50.00
     """Reward for a generated picture from model """
 
-    resolution:int =768
+    resolution:int =256
 
     "Image square size"
-    reward_function_usage: bool = True
+    reward_function_usage: bool = False
     """ Using pretrained model to get reward, otherwise, use image with reward in advance"""
 
-    valid_batch_size: int=6
+    valid_batch_size: int=1
     """ Validation dataset batch size"""
     valid_size:int=50
     dataset_index=3
 
-    sample_batch_size: int = 6
+    sample_batch_size: int = 2
     """Batch size (per GPU!) to use for sampling."""
-    offpolicy_sample_batch_size: int = 3
+    offpolicy_sample_batch_size: int = 1
     """Batch size for offpolicy from dataset - not larger than sample_batch_size"""
 
-    train_batch_size: int = 6
+    train_batch_size: int = 2
     """Batch size (per GPU!) to use for training."""
 
     train_num_inner_epochs: int = 1
@@ -91,7 +91,7 @@ class DDPOConfig:
     # hyperparameters
 
 
-    num_epochs: int =1000
+    num_epochs: int =3
     resume_from: Optional[str] = "./outputs/checkpoints/checkpoint_0"
     resume_from: Optional[str] = ""
     """== checkpoin from // Resume training from a checkpoint."""
@@ -99,7 +99,7 @@ class DDPOConfig:
     save_freq: int = 20
     """Number of epochs between saving model checkpoints."""
 
-    huggingface_note: str = "test_only"
+    huggingface_note: str = "test3e"
     """Save model note."""
 
     pass_images:int=0
