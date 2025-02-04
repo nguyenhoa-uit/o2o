@@ -1,4 +1,4 @@
-# Copyright 2023 DDPO-pytorch authors (Kevin Black), The HuggingFace Team, metric-space. All rights reserved.
+# Copyright 2025 O2O-pytorch authors (Hoa Nguyen), The HuggingFace Team, metric-space. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -39,9 +39,9 @@ if is_peft_available():
 
 
 @dataclass
-class DDPOPipelineOutput:
+class O2OPipelineOutput:
     """
-    Output class for the diffusers pipeline to be finetuned with the DDPO trainer
+    Output class for the diffusers pipeline to be finetuned with the O2O trainer
 
     Args:
         images (`torch.Tensor`):
@@ -59,9 +59,9 @@ class DDPOPipelineOutput:
 
 
 @dataclass
-class DDPOSchedulerOutput:
+class O2OSchedulerOutput:
     """
-    Output class for the diffusers scheduler to be finetuned with the DDPO trainer
+    Output class for the diffusers scheduler to be finetuned with the O2O trainer
 
     Args:
         latents (`torch.Tensor`):
@@ -74,15 +74,15 @@ class DDPOSchedulerOutput:
     log_probs: torch.Tensor
 
 
-class DDPOStableDiffusionPipeline:
+class O2OStableDiffusionPipeline:
     """
-    Main class for the diffusers pipeline to be finetuned with the DDPO trainer
+    Main class for the diffusers pipeline to be finetuned with the O2O trainer
     """
 
-    def __call__(self, *args, **kwargs) -> DDPOPipelineOutput:
+    def __call__(self, *args, **kwargs) -> O2OPipelineOutput:
         raise NotImplementedError
 
-    def scheduler_step(self, *args, **kwargs) -> DDPOSchedulerOutput:
+    def scheduler_step(self, *args, **kwargs) -> O2OSchedulerOutput:
         raise NotImplementedError
 
     @property
@@ -198,7 +198,7 @@ def scheduler_step(
     use_clipped_model_output: bool = False,
     generator=None,
     x_t_1: Optional[torch.FloatTensor] = None,
-) -> DDPOSchedulerOutput:
+) -> O2OSchedulerOutput:
     """
 
     Predict the sample at the previous timestep by reversing the SDE. Core function to propagate the diffusion
@@ -220,7 +220,7 @@ def scheduler_step(
             CycleDiffusion. (https://huggingface.co/papers/2210.05559)
 
     Returns:
-        `DDPOSchedulerOutput`: the predicted sample at the previous timestep and the log probability of the sample
+        `O2OSchedulerOutput`: the predicted sample at the previous timestep and the log probability of the sample
     """
 
     if self.num_inference_steps is None:
@@ -310,7 +310,7 @@ def scheduler_step(
     # mean along all but batch dimension
     log_prob = log_prob.mean(dim=tuple(range(1, log_prob.ndim)))
 
-    return DDPOSchedulerOutput(x_t_1.type(x_t.dtype), log_prob)
+    return O2OSchedulerOutput(x_t_1.type(x_t.dtype), log_prob)
 
 
 # 1. The output type for call is different as the logprobs are now returned
@@ -400,7 +400,7 @@ def pipeline_step(
     Examples:
 
     Returns:
-        `DDPOPipelineOutput`: The generated image, the predicted latents used to generate the image and the associated log probabilities
+        `O2OPipelineOutput`: The generated image, the predicted latents used to generate the image and the associated log probabilities
     """
     # 0. Default height and width to unet
     height = height or self.unet.config.sample_size * self.vae_scale_factor
@@ -546,7 +546,7 @@ def pipeline_step(
     print(f"all_log_probs = {all_log_probs} \n")
 
 
-    return DDPOPipelineOutput(image, all_latents, all_log_probs)
+    return O2OPipelineOutput(image, all_latents, all_log_probs)
 
 def add_double_noise(x_0, timestep, scheduler,device,generator):
     """
@@ -740,7 +740,7 @@ def pipeline_step_with_grad(
     Examples:
 
     Returns:
-        `DDPOPipelineOutput`: The generated image, the predicted latents used to generate the image and the associated log probabilities
+        `O2OPipelineOutput`: The generated image, the predicted latents used to generate the image and the associated log probabilities
     """
     # 0. Default height and width to unet
     height = height or pipeline.unet.config.sample_size * pipeline.vae_scale_factor
@@ -890,7 +890,7 @@ def pipeline_step_with_grad(
     if hasattr(pipeline, "final_offload_hook") and pipeline.final_offload_hook is not None:
         pipeline.final_offload_hook.offload()
 
-    return DDPOPipelineOutput(image, all_latents, all_log_probs)
+    return O2OPipelineOutput(image, all_latents, all_log_probs)
 
 
 def get_latents_from_image(self,image,device):
@@ -925,7 +925,7 @@ def pipeline_step_offline(
    
 
     Returns:
-        `DDPOPipelineOutput`: The generated image, the predicted latents used to generate the image and the associated log probabilities
+        `O2OPipelineOutput`: The generated image, the predicted latents used to generate the image and the associated log probabilities
     """
 
     # 0. Default height and width to unet
@@ -1074,10 +1074,10 @@ def pipeline_step_offline(
     if hasattr(self, "final_offload_hook") and self.final_offload_hook is not None:
         self.final_offload_hook.offload()
     print(f"all_log_probs_offline = {all_log_probs_offline} \n")
-    return DDPOPipelineOutput(image, [x_t_list,x_t_1_list], all_log_probs_offline)
+    return O2OPipelineOutput(image, [x_t_list,x_t_1_list], all_log_probs_offline)
 
 
-class DefaultDDPOStableDiffusionPipeline(DDPOStableDiffusionPipeline):
+class DefaultO2OStableDiffusionPipeline(O2OStableDiffusionPipeline):
     def __init__(self, pretrained_model_name: str, *, pretrained_model_revision: str = "main", use_lora: bool = True):
         self.sd_pipeline = StableDiffusionPipeline.from_pretrained(
             pretrained_model_name, revision=pretrained_model_revision
@@ -1110,16 +1110,16 @@ class DefaultDDPOStableDiffusionPipeline(DDPOStableDiffusionPipeline):
         self.sd_pipeline.unet.requires_grad_(not self.use_lora)
         self.save_sample=[None]
 
-    def __call__(self, *args, **kwargs) -> DDPOPipelineOutput:
+    def __call__(self, *args, **kwargs) -> O2OPipelineOutput:
         return pipeline_step(self.sd_pipeline, *args, **kwargs)
 
-    def rgb_with_grad(self, *args, **kwargs) -> DDPOPipelineOutput:
+    def rgb_with_grad(self, *args, **kwargs) -> O2OPipelineOutput:
         return pipeline_step_with_grad(self.sd_pipeline, *args, **kwargs)
 
-    def scheduler_step(self, *args, **kwargs) -> DDPOSchedulerOutput:
+    def scheduler_step(self, *args, **kwargs) -> O2OSchedulerOutput:
         return scheduler_step(self.sd_pipeline.scheduler, *args, **kwargs)
 
-    def call_offline(self, *args, **kwargs) -> DDPOSchedulerOutput:
+    def call_offline(self, *args, **kwargs) -> O2OSchedulerOutput:
         return pipeline_step_offline(self.sd_pipeline, *args, **kwargs)
 
 

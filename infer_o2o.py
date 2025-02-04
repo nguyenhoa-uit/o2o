@@ -2,7 +2,7 @@
 import torch
 from IPython.display import display, Image
 # from trl import DefaultDDPOStableDiffusionPipeline
-from codes.modeling_sd_base import DefaultDDPOStableDiffusionPipeline
+from codes.modeling_sd_base import DefaultO2OStableDiffusionPipeline
 
 
 
@@ -10,19 +10,19 @@ from codes.modeling_sd_base import DefaultDDPOStableDiffusionPipeline
 # stabilityai/stablelm-2-1_6b
 # stabilityai/stable-diffusion-3-medium
 # stabilityai/stable-diffusion-2-1
-pipeline = DefaultDDPOStableDiffusionPipeline(
+pipeline = DefaultO2OStableDiffusionPipeline(
    "stabilityai/stable-diffusion-2-1",
 )
 
 model='base_Stable'
 weight=None
-weight='Fixing20'
+weight='test_VSC'
 loop=11
 
 if weight !=None:
     model=weight
 
-    pipeline.sd_pipeline.load_lora_weights(f"./outputs/lora_weights/{weight}")
+    pipeline.sd_pipeline.load_lora_weights(f"./outputs/{weight}")
 
 
 device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
@@ -32,7 +32,7 @@ device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cp
 pipeline.vae.to(device, torch.float16)
 pipeline.text_encoder.to(device, torch.float16)
 pipeline.unet.to(device, torch.float16)
-seed=1
+seed=0
 torch.manual_seed(seed)
 p="An extremely beautiful Asian girl"
 q="Some girls are talking on grass"

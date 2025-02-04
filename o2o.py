@@ -14,7 +14,7 @@
 """
 
 
-!python examples/scripts/ddpo.py \
+!python examples/scripts/o2o.py \
     --num_epochs=4 \
     --train_gradient_accumulation_steps=1 \
     --sample_num_steps=50 \
@@ -43,9 +43,9 @@ from huggingface_hub.utils import EntryNotFoundError
 from transformers import CLIPModel, CLIPProcessor, HfArgumentParser, is_torch_npu_available, is_torch_xpu_available
 
 from datasets import load_dataset
-from codes.ddpo_config import DDPOConfig
-from codes.ddpo_trainer import DDPOTrainer
-from codes.modeling_sd_base import DefaultDDPOStableDiffusionPipeline
+from codes.o2o_config import O2OConfig
+from codes.o2o_trainer import O2OTrainer
+from codes.modeling_sd_base import DefaultO2OStableDiffusionPipeline
 from codes.import_utils import is_npu_available, is_xpu_available
 
 import io
@@ -53,6 +53,10 @@ import pandas as pd
 from PIL import Image
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
+
+import math
+from torchvision.transforms import functional as F
+# from codes.used_dataset import ImageLionDatasetHugging, ImageArtDataset
 
 def jpeg_incompressibility():
     def _fn(images, prompts, metadata):
@@ -74,6 +78,19 @@ def jpeg_incompressibility():
 
     return _fn
 
+# list of example prompts to feed stable diffusion
+animals = [
+    "cat",
+    "dog",
+    "horse",
+    "monkey",
+    "rabbit",
+    "zebra"
+]
+
+prompts = [
+    "An extremely beautiful asian girl",
+]
 
 
 class AestheticScorer(torch.nn.Module):
@@ -129,19 +146,6 @@ def aesthetic_scorer(hub_model_id, model_filename):
     return _fn
 
 
-# list of example prompts to feed stable diffusion
-animals = [
-    "cat",
-    "dog",
-    "horse",
-    "monkey",
-    "rabbit",
-    "zebra"
-]
-
-prompts = [
-    "An extremely beautiful asian girl",
-]
 
 def prompt_fn():
     return np.random.choice(prompts), {}
@@ -166,8 +170,6 @@ def image_outputs_logger(image_data, global_step, accelerate_logger,caption='NA'
         print("cannot log FileNotFoundError")
 
 
-import math
-from torchvision.transforms import functional as F
 
 class CustomResize():     
     # def __init__(self):
@@ -175,20 +177,20 @@ class CustomResize():
     def __call__(self, img):
         w, h = img.size
         if w>=h:
-          h=ddpo_config.resolution
-          w=int(w*ddpo_config.resolution/h)
+          h=o2o_config.resolution
+          w=int(w*o2o_config.resolution/h)
           img=F.resize(img,  (w, h))
-          pad=int((w-ddpo_config.resolution)/2)
+          pad=int((w-o2o_config.resolution)/2)
           top=0
           left=pad
         else:
-          w=ddpo_config.resolution
-          h=int(h*ddpo_config.resolution/w)
+          w=o2o_config.resolution
+          h=int(h*o2o_config.resolution/w)
           img=F.resize(img,  (w, h))
-          pad=((h-ddpo_config.resolution)/2)
+          pad=((h-o2o_config.resolution)/2)
           top=pad
           left=0
-        return F.crop(img,top=top,left=left,height=ddpo_config.resolution,width=ddpo_config.resolution)
+        return F.crop(img,top=top,left=left,height=o2o_config.resolution,width=o2o_config.resolution)
 
 
 class MLP(nn.Module):
@@ -210,7 +212,6 @@ class MLP(nn.Module):
         return self.layers(embed)
 
 
-
 class ImageScoreDatasetScore(Dataset):
     def __init__(self, csv_file, image_folder,transform=None,reward=None):
         self.data = pd.read_csv(csv_file)
@@ -224,11 +225,10 @@ class ImageScoreDatasetScore(Dataset):
     def __getitem__(self, idx):
         img_name = os.path.join(self.image_folder, self.data.iloc[idx, 0])
         image = Image.open(img_name).convert('RGB')
-        # score = self.data.iloc[idx, 1]
         prompt = self.data.iloc[idx, 2]
         
         if self.reward==None:
-            temp=str(self.data.iloc[idx, 0]).split("_")[0]
+            temp=str(self.data.iloc[idx, 0]).split(".")[0]
             score=int(temp)
         else:
             score=self.reward
@@ -238,6 +238,7 @@ class ImageScoreDatasetScore(Dataset):
         batch=(image, torch.tensor(score, dtype=torch.float32), prompt,{},self.data.iloc[idx, 0])
         return batch
 
+    # dataset_index=0
 class ImageLionDatasetHugging(Dataset):
     def __init__(self,  data_file="Nguyen17/laion_art_en",transform=None,length=5000):
             # dataset= load_dataset("laion/laion-art")
@@ -263,23 +264,40 @@ class ImageLionDatasetHugging(Dataset):
     def __getitem__(self, idx):
         self.index+=1
         try_load=True
+        log_note=None
         while try_load:
-            img_link=self.data['URL'][self.index]
-            print(f"ix  {self.index} link {img_link}")
-            tail='jpg'
-            file_name=f"./inputs/laion_saving/{self.index}_laion_image.{tail}"
-            try_load=False
-
-            try:
-                image = Image.open(requests.get(img_link,stream=True).raw).convert('RGB')
-                # image.save(file_name)
-                
-            except:
-                if self.index>self.length:
-                  self.index=0
-                else:
-                  self.index+=1
+            if self.data['WIDTH'][self.index]<700:
+                log_note='small size'
                 try_load=True
+            elif self.data['HEIGHT'][self.index]<700:
+                log_note='small size'
+                try_load=True
+            elif self.data['HEIGHT'][self.index]>self.data['WIDTH'][self.index]*1.2:
+                try_load=True
+                log_note='non square size'
+            elif self.data['WIDTH'][self.index]>self.data['HEIGHT'][self.index]*1.2:
+                try_load=True
+                log_note='non square size'
+
+            else:
+                img_link=self.data['URL'][self.index]
+                print(f"ix  {self.index} link {img_link}")
+                tail='jpg'
+                file_name=f"./inputs/laion_saving/{self.index}_laion_image.{tail}"
+                try_load=False
+                try:
+                    image = Image.open(requests.get(img_link,stream=True).raw).convert('RGB')
+                    # image.save(file_name)                
+                except:
+                    if self.index>self.length:
+                        self.index=0
+                    else:
+                        self.index+=1
+                    try_load=True
+                    log_note='max length index'
+
+        if log_note:
+            print(f"ImageLionDatasetHugging log {log_note} \n")
 
         if self.transform:
             image = self.transform(image)
@@ -289,7 +307,6 @@ class ImageLionDatasetHugging(Dataset):
         score=10*self.data['aesthetic'][self.index]
         batch=(image, torch.tensor(score, dtype=torch.float16), prompt,{},"NA")
         return batch
-
 
 class ImageScoreDataset(Dataset):
     def __init__(self,  image_folder,transform=None,reward=None,prompt="An extremely beautiful Asian girl"):
@@ -314,7 +331,6 @@ class ImageScoreDataset(Dataset):
             image = self.transform(image)
         batch=(image, torch.tensor(score, dtype=torch.float16), prompt,{},self.data[idx])
         return batch
-
 
 class ImageArtDataset(Dataset):
     def __init__(self,  image_folder,transform=None,reward=0):
@@ -398,13 +414,13 @@ def collate_fn(batch):
     return tuple(zip(*batch))
     
 
-
 @dataclass
 class ScriptArguments:
 # "runwayml/stable-diffusion-v1-5"
+# "stabilityai/stable-diffusion-2-1"
 # 
     pretrained_model: str = field(
-        default="runwayml/stable-diffusion-v1-5", metadata={"help": "the pretrained model to use"}
+        default="stabilityai/stable-diffusion-2-1", metadata={"help": "the pretrained model to use"}
     )
   
     pretrained_revision: str = field(default="main", metadata={"help": "the pretrained model revision to use"})
@@ -443,9 +459,9 @@ class ScriptArguments:
 
 
 if __name__ == "__main__":
-    parser = HfArgumentParser((ScriptArguments, DDPOConfig))
-    args, ddpo_config = parser.parse_args_into_dataclasses(return_remaining_strings=True)[:2]
-    ddpo_config.project_kwargs = {
+    parser = HfArgumentParser((ScriptArguments, O2OConfig))
+    args, o2o_config = parser.parse_args_into_dataclasses(return_remaining_strings=True)[:2]
+    o2o_config.project_kwargs = {
         "logging_dir": "./outputs/logs",
         "automatic_checkpoint_naming": True,
         "total_limit": 5,
@@ -453,65 +469,55 @@ if __name__ == "__main__":
     }
 
 
-
     transform = transforms.Compose(
         [
-            transforms.Resize(ddpo_config.resolution, interpolation=transforms.InterpolationMode.BILINEAR),
-            transforms.RandomCrop(ddpo_config.resolution),
+            transforms.Resize(o2o_config.resolution, interpolation=transforms.InterpolationMode.BILINEAR),
+            transforms.RandomCrop(o2o_config.resolution),
             transforms.RandomHorizontalFlip() if True else transforms.Lambda(lambda x: x),
             transforms.ToTensor(),
             # transforms.Normalize([0.5], [0.5]),
         ]
     )
 
-    print(f' ddo_config {ddpo_config}' )
+    print(f' ddo_config {o2o_config}' )
     print("-------------------------------------------------")
 
     print(args)
 
-#  data_folder: str = './inputs/An_extremely_beautiful_Asian_girl_v1'
-# data_folder: str = './inputs/selected-vincent-van-gogh'
 
-    match ddpo_config.dataset_index:
+    match o2o_config.dataset_index:
       case 0:
-        dataset=ImageLionDatasetHugging(transform=transform,length=4000)
+        dataset=ImageLionDatasetHugging(transform=transform,length=5000)
       case 1:
         # all score csv
-        data_folder='./inputs/An_extremely_beautiful_Asian_girl_v1'
+        data_folder='./inputs/An_extremely_beautiful_Asian_girl_v1/'
         csv_file=data_folder+'data.csv'
-        dataset=ImageScoreDatasetScore(csv_file=csv_file, image_folder=data_folder,transform=transform,reward=None)
+        dataset=ImageScoreDatasetScore(csv_file=csv_file, image_folder=data_folder,transform=transform,reward=100)
       case 2:
         dataset=ImageArtDataset(image_folder='./inputs/selected-vincent-van-gogh',transform=transform,reward=0)
       case 3:
-        dataset=ImagePickaPicDatasetHugging(image_folder="yuvalkirstain/pickapic_v2",transform=transform,reward=ddpo_config.high_reward,length=5000)
+        dataset=ImagePickaPicDatasetHugging(image_folder="yuvalkirstain/pickapic_v2",transform=transform,reward=o2o_config.high_reward,length=5000)
       case 7:
         data_folder='./inputs/cellphone_data'
-        dataset = ImageScoreDataset(image_folder=data_folder,transform=transform,reward=ddpo_config.high_reward,prompt="A man and woman using their cellphones, photograph")
+        dataset = ImageScoreDataset(image_folder=data_folder,transform=transform,reward=o2o_config.high_reward,prompt="A man and woman using their cellphones, photograph")
       case _:
         dataset=ImageLionDatasetHugging(transform=transform,length=5000)
-
-
-
-    # if ddpo_config.offpolicy_sample_batch_size>0:
-    #     dataloader = DataLoader(dataset, batch_size=ddpo_config.offpolicy_sample_batch_size, shuffle=True)
-    # else:
-    #     dataloader=None
-
 
     print("------------------------------------------------------------------------")
     print("Starting loading pipline -----------------------------------------------")
 
 
-    pipeline = DefaultDDPOStableDiffusionPipeline(
+    pipeline = DefaultO2OStableDiffusionPipeline(
         args.pretrained_model, pretrained_model_revision=args.pretrained_revision, use_lora=args.use_lora
     )
     if (args.load_folder!=''):
       pipeline.sd_pipeline.load_lora_weights(args.load_folder)
 
-
-    trainer = DDPOTrainer(
+    print("------------------------------------------------------------------------")
+    print("Instance trainer       -----------------------------------------------")
+    trainer = O2OTrainer(
         dataset,
-        ddpo_config,
+        o2o_config,
         aesthetic_scorer(args.hf_hub_aesthetic_model_id, args.hf_hub_aesthetic_model_filename),
         prompt_fn,
         pipeline,
@@ -522,19 +528,19 @@ if __name__ == "__main__":
     print("Starting training        -----------------------------------------------")
 
 
-    epochs=ddpo_config.num_epochs
+    epochs=o2o_config.num_epochs
     trainer.train(epochs=epochs)
 
     print("\n")
     print("------------------------------------------------------------------------")
     print("Starting saving model    -----------------------------------------------")
 
-    model_note=ddpo_config.huggingface_note
-    num_epochs=ddpo_config.global_step+ddpo_config.num_epochs
-    off_batch=ddpo_config.offpolicy_sample_batch_size
-    name=f"dataset_index{ddpo_config.dataset_index}_{model_note}_offbatch{off_batch}_e{num_epochs}"
+    model_note=o2o_config.huggingface_note
+    num_epochs=o2o_config.global_step+o2o_config.num_epochs
+    off_batch=o2o_config.offpolicy_sample_batch_size
+    name=f"dataset_index{o2o_config.dataset_index}_{model_note}_offbatch{off_batch}_e{num_epochs}"
     
-    trainer.save_pretrained(model_note)
+    trainer.save_pretrained(f"./outputs/{model_note}")
     if (args.hf_hub_model_id==""):
         print("Not load to github")
     else:

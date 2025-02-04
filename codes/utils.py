@@ -671,7 +671,6 @@ def exact_div(a, b, custom_error_message=""):
     return q
 
 
-# copied from https://github.com/kvablack/ddpo-pytorch/blob/main/ddpo_pytorch/stat_tracking.py#L5
 class PerPromptStatTracker:
     r"""
     Class for tracking statistics per prompt. Mainly used to calculate advantage for the DPPO algorithm
