@@ -1,5 +1,4 @@
 .*
 /outputs/*
 /wandb/*
-/inputs/*
 !/.gitignore
