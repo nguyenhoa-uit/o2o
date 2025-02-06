@@ -31,7 +31,9 @@ from codes.modeling_sd_base import O2OStableDiffusionPipeline
 from codes.base import BaseTrainer
 from codes.o2o_config import O2OConfig
 from codes.utils import PerPromptStatTracker
-
+import tensorflow_hub as hub
+from torchvision.transforms import functional as F
+from codes.utils import predict_vila_image
 
 logger = get_logger(__name__)
 
@@ -238,6 +240,8 @@ class O2OTrainer(BaseTrainer):
             pass_image+=1
         if pass_image>0:
           print(f"checkpoint image pass {pass_image}")
+        self.vila_model=hub.load('https://tfhub.dev/google/vila/image/1')
+
 
 
 
@@ -283,13 +287,21 @@ class O2OTrainer(BaseTrainer):
           )
         
         print(rewards)
+        # prompt_image_data = iteration x bachsize
+
+        images, prompts, _ = prompt_image_data[-1]
+        vila_r_first=predict_vila_image(F.to_pil_image(images[0], mode=None),self.vila_model)
+        vila_r_last=predict_vila_image(F.to_pil_image(images[-1], mode=None),self.vila_model)
 
         for i, image_data in enumerate(prompt_image_data):
             image_data.extend([rewards[i], rewards_metadata[i]])
 
 
+
         if self.image_samples_callback is not None:
             self.image_samples_callback(prompt_image_data, global_step, self.accelerator.trackers[0],caption='main')
+
+
 
 
         rewards = torch.cat(rewards)
@@ -303,7 +315,6 @@ class O2OTrainer(BaseTrainer):
         else:
           rewards_log=rewards.mean()
 
-        valid_value=0
 
         if self.config.per_prompt_stat_tracking:
             prompt_ids = self.accelerator.gather(samples["prompt_ids"]).cpu().numpy()
@@ -328,22 +339,24 @@ class O2OTrainer(BaseTrainer):
             print(f'------****************Inner epoch {inner_epoch}')
 
             # shuffle samples along batch dimension
-            perm = torch.randperm(total_batch_size, device=self.accelerator.device)
-            
-            samples = {k: v.to(self.accelerator.device)[perm] for k, v in samples.items()}
-            # shuffle along time dimension independently for each sample
-            # still trying to understand the code below
 
-            
-            perms = torch.stack(
-                [torch.randperm(num_timesteps, device=self.accelerator.device) for _ in range(total_batch_size)]
-            )
+            if self.config.shuffle_inner:
+                perm = torch.randperm(total_batch_size, device=self.accelerator.device)
+                
+                samples = {k: v.to(self.accelerator.device)[perm] for k, v in samples.items()}
+                # shuffle along time dimension independently for each sample
+                # still trying to understand the code below
 
-            for key in ["timesteps", "latents", "next_latents", "log_probs"]:
-                samples[key] = samples[key][
-                    torch.arange(total_batch_size, device=self.accelerator.device)[:, None],
-                    perms,
-                ]
+                
+                perms = torch.stack(
+                    [torch.randperm(num_timesteps, device=self.accelerator.device) for _ in range(total_batch_size)]
+                )
+
+                for key in ["timesteps", "latents", "next_latents", "log_probs"]:
+                    samples[key] = samples[key][
+                        torch.arange(total_batch_size, device=self.accelerator.device)[:, None],
+                        perms,
+                    ]
             # samples['advantages'].shape=torch.Size([20])
             original_keys = samples.keys()
             original_values = samples.values()
@@ -364,9 +377,8 @@ class O2OTrainer(BaseTrainer):
                 raise ValueError(
                     "Optimization step should have been performed by this point. Please check calculated gradient accumulation settings."
                 )
-        log_valid_value=5
-        # log_valid_value=self.compute_valid_value(batch_size=self.config.valid_batch_size)
-        valid_value=math.exp(valid_value)
+            
+        log_valid_value=self.compute_valid_logprob(batch_size=self.config.valid_batch_size)
         self.accelerator.log(
             {
                 "artistic_score": rewards_log,
@@ -374,7 +386,9 @@ class O2OTrainer(BaseTrainer):
                 "reward_mean": rewards.mean(),
                 "reward_std": rewards.std(),
                 "validation_logprob": log_valid_value,
-                "validation_prob": valid_value,
+                "vila_r_first": vila_r_first,
+                "vila_r_last": vila_r_last,
+
             },
             step=global_step,
         )
@@ -387,12 +401,11 @@ class O2OTrainer(BaseTrainer):
             print('checkpoint saving error')
         return global_step
 
-    def compute_valid_value(self,batch_size):
+    def compute_valid_logprob(self,batch_size):
         log_probs=self._generate_samples_offline_valid(
         batch_size=batch_size
         ) 
-        res=log_probs
-        return res
+        return log_probs
 
     def _generate_samples_with_mode(self,iterations, batch_size,offpolicy_batch_size):
         onpolicy_batch_size=batch_size-offpolicy_batch_size
@@ -560,7 +573,6 @@ class O2OTrainer(BaseTrainer):
             self.dataloader_val_iter=iter(self.dataloader_val)
             n=next(self.dataloader_val_iter)
         images_offline,scores_offline,prompts,_,img_name=n[0],n[1],n[2],n[3],n[4]
-        print(prompts)
 
         if self.config.reward_function_usage:
             prompts, prompt_metadata = zip(*[self.prompt_fn() for _ in range(batch_size)])
@@ -596,9 +608,8 @@ class O2OTrainer(BaseTrainer):
             log_probs = sd_output.log_probs
 
         log_probs = torch.stack(log_probs, dim=1)  # (batch_size, num_steps, 1)
-        res=float(torch.mean(log_probs))
            
-        return res
+        return float(torch.mean(log_probs))
     
 
     def _generate_samples_offline(self, iterations, batch_size,next_train_iter):
@@ -625,8 +636,8 @@ class O2OTrainer(BaseTrainer):
 
         for _ in range(iterations):
 
-            prompts, prompt_metadata = zip(*[self.prompt_fn() for _ in range(batch_size)])
-            print(prompts)
+            _, prompt_metadata = zip(*[self.prompt_fn() for _ in range(batch_size)])
+
             images_offline,scores_offline,prompts,_,img_name=next_train_iter[0],next_train_iter[1],next_train_iter[2],next_train_iter[3],next_train_iter[4]
             print(prompts)
 
@@ -695,7 +706,7 @@ class O2OTrainer(BaseTrainer):
 
         return samples, prompt_image_pairs,prompts
     
-
+    # Compute arstistic score with self.reward_fn
     def compute_rewards(self, prompt_image_pairs, is_async=False):
         if not is_async:
             rewards = []

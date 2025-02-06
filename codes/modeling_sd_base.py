@@ -1015,6 +1015,8 @@ def pipeline_step_offline(
 
     with self.progress_bar(total=num_inference_steps) as progress_bar:
         for i, t in enumerate(timesteps):
+            if i>=47:
+                test=1
             latents=x_t_list[i]
             latents_prev=x_t_1_list[i]
             # expand the latents if we are doing classifier free guidance

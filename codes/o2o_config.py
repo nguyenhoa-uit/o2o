@@ -37,7 +37,6 @@ class O2OConfig:
     tracker_project_name: str = "Dev"
     """Name of project to use for tracking"""
 
-
     # train_learning_rate: float = 3e-4  
     train_learning_rate: float = 3e-4
     """Learning rate."""
@@ -50,15 +49,17 @@ class O2OConfig:
     low_reward: float=50.00
     """Reward for a generated picture from model """
     resolution:int =256
-
     "Image square size"
+
     reward_function_usage: bool = False
     """ Using pretrained model to get reward, otherwise, use image with reward in advance"""
 
     valid_batch_size: int=1
     """ Validation dataset batch size"""
     valid_size: int=50
-    dataset_index: int=1
+
+    # 0:ImageLionArtDatasetHugging // 1: Beauti; 3:PickaPic
+    dataset_index: int=3
 
     sample_batch_size: int = 2
     """Batch size (per GPU!) to use for sampling."""
@@ -85,8 +86,8 @@ class O2OConfig:
     """Top-level logging directory for checkpoint saving."""
     # hyperparameters
 
+    num_epochs: int =21
 
-    num_epochs: int =11
     resume_from: Optional[str] = "./outputs/checkpoints/checkpoint_0"
     resume_from: Optional[str] = ""
     """== checkpoin from // Resume training from a checkpoint."""
@@ -104,7 +105,8 @@ class O2OConfig:
     """Show artistic score on wandb"""
 
 
-
+    shuffle_inner: bool= False
+    """Shuffling the samples in inner RL step """
 
 # DEFAULT NO CHANGE
     mixed_precision: str = "fp16"

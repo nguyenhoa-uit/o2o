@@ -11,24 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""
 
 
-!python examples/scripts/o2o.py \
-    --num_epochs=4 \
-    --train_gradient_accumulation_steps=1 \
-    --sample_num_steps=50 \
-    --sample_batch_size=4 \
-    --train_batch_size=2 \
-    --sample_num_batches_per_epoch=4 \
-    --per_prompt_stat_tracking=True \
-    --per_prompt_stat_tracking_buffer_size=32 \
-    --tracker_project_name="stable_diffusion_training" \
-    --log_with="wandb" \
-    --logdir="ll" \
-    --save_freq=200  \
-    --save_folder="../ddpo_compressibility4"
-"""
 
 import requests
 import os
@@ -56,7 +40,8 @@ from torchvision import transforms
 
 import math
 from torchvision.transforms import functional as F
-# from codes.used_dataset import ImageLionDatasetHugging, ImageArtDataset
+
+from codes.used_dataset import ImageLionArtDatasetHugging, ImageArtPaintingDataset,ImagePickaPicDatasetHugging, ImageScoreDataset, ImageScoreDatasetCSV
 
 def jpeg_incompressibility():
     def _fn(images, prompts, metadata):
@@ -88,9 +73,6 @@ animals = [
     "zebra"
 ]
 
-prompts = [
-    "An extremely beautiful asian girl",
-]
 
 
 class AestheticScorer(torch.nn.Module):
@@ -148,14 +130,16 @@ def aesthetic_scorer(hub_model_id, model_filename):
 
 
 def prompt_fn():
-    return np.random.choice(prompts), {}
+    return np.random.choice(animals), {}
 
 def image_outputs_logger(image_data, global_step, accelerate_logger,caption='NA'):
     # For the sake of this example, we will only log the last batch of images
     # and associated data
+    # image_data = iteration x bachsize
     result = {}
     images, prompts, _, rewards, _ = image_data[-1]
     l=len(image_data)
+    
 
     for i, image in enumerate(images):
         prompt = prompts[i]
@@ -212,203 +196,6 @@ class MLP(nn.Module):
         return self.layers(embed)
 
 
-class ImageScoreDatasetScore(Dataset):
-    def __init__(self, csv_file, image_folder,transform=None,reward=None):
-        self.data = pd.read_csv(csv_file)
-        self.image_folder = image_folder
-        self.transform = transform
-        self.reward=reward
-
-    def __len__(self):
-        return len(self.data)
-
-    def __getitem__(self, idx):
-        img_name = os.path.join(self.image_folder, self.data.iloc[idx, 0])
-        image = Image.open(img_name).convert('RGB')
-        prompt = self.data.iloc[idx, 2]
-        
-        if self.reward==None:
-            temp=str(self.data.iloc[idx, 0]).split(".")[0]
-            score=int(temp)
-        else:
-            score=self.reward
-
-        if self.transform:
-            image = self.transform(image)
-        batch=(image, torch.tensor(score, dtype=torch.float32), prompt,{},self.data.iloc[idx, 0])
-        return batch
-
-    # dataset_index=0
-class ImageLionDatasetHugging(Dataset):
-    def __init__(self,  data_file="Nguyen17/laion_art_en",transform=None,length=5000):
-            # dataset= load_dataset("laion/laion-art")
-            # dataset.save_to_disk("./outputs/laion_art.hf")
-        try:   
-            print("loading dataset Laion")
-            self.data= load_dataset("./outputs/laion_art_en.hf")
-        except:
-            self.data= load_dataset(data_file)
-            print("saving dataset Laion")
-            save_name=data_file.split("/")[-1]
-            self.data.save_to_disk(f"./outputs/{save_name}.hf")
-        
-        self.data=self.data['train']
-        self.transform = transform
-        self.index=0
-        self.length=length
-        if length !=None:
-            self.data=self.data[:length]
-    def __len__(self):
-        return len(self.data)
-
-    def __getitem__(self, idx):
-        self.index+=1
-        try_load=True
-        log_note=None
-        while try_load:
-            if self.data['WIDTH'][self.index]<700:
-                log_note='small size'
-                try_load=True
-            elif self.data['HEIGHT'][self.index]<700:
-                log_note='small size'
-                try_load=True
-            elif self.data['HEIGHT'][self.index]>self.data['WIDTH'][self.index]*1.2:
-                try_load=True
-                log_note='non square size'
-            elif self.data['WIDTH'][self.index]>self.data['HEIGHT'][self.index]*1.2:
-                try_load=True
-                log_note='non square size'
-
-            else:
-                img_link=self.data['URL'][self.index]
-                print(f"ix  {self.index} link {img_link}")
-                tail='jpg'
-                file_name=f"./inputs/laion_saving/{self.index}_laion_image.{tail}"
-                try_load=False
-                try:
-                    image = Image.open(requests.get(img_link,stream=True).raw).convert('RGB')
-                    # image.save(file_name)                
-                except:
-                    if self.index>self.length:
-                        self.index=0
-                    else:
-                        self.index+=1
-                    try_load=True
-                    log_note='max length index'
-
-        if log_note:
-            print(f"ImageLionDatasetHugging log {log_note} \n")
-
-        if self.transform:
-            image = self.transform(image)
-
-        prompt =self.data['TEXT'][self.index]
-        print(f"promt index{idx}_{self.index} {prompt}")
-        score=10*self.data['aesthetic'][self.index]
-        batch=(image, torch.tensor(score, dtype=torch.float16), prompt,{},"NA")
-        return batch
-
-class ImageScoreDataset(Dataset):
-    def __init__(self,  image_folder,transform=None,reward=None,prompt="An extremely beautiful Asian girl"):
-        self.data = []
-        for file in os.listdir(image_folder):
-          self.data.append(file)
-        self.image_folder = image_folder
-        self.transform = transform
-        self.reward=reward
-        self.prompt=prompt
-
-    def __len__(self):
-        return len(self.data)
-
-    def __getitem__(self, idx):
-        img_name = os.path.join(self.image_folder, self.data[idx])
-        image = Image.open(img_name).convert('RGB')
-        prompt = self.prompt
-        score=self.reward
-
-        if self.transform:
-            image = self.transform(image)
-        batch=(image, torch.tensor(score, dtype=torch.float16), prompt,{},self.data[idx])
-        return batch
-
-class ImageArtDataset(Dataset):
-    def __init__(self,  image_folder,transform=None,reward=0):
-        self.data = []
-        for file in os.listdir(image_folder):
-          nn=len(file)-4
-          if file[nn:]==".jpg":
-            self.data.append(file)
-        self.image_folder = image_folder
-        self.transform = transform
-        self.reward=reward
-
-    def __len__(self):
-        return len(self.data)
-
-    def __getitem__(self, idx):
-        img_name = os.path.join(self.image_folder, self.data[idx])
-        image = Image.open(img_name)
-        txt_file = str(img_name)+'.txt'
-        # with open('readme.txt') as f:
-        #   lines = f.readlines()
-        prompt=pd.read_csv(txt_file)
-        
-        # prompt=prompt.iloc[0, 0]
-       
-       
-        print(prompt)
-        prompt="".join(list(prompt))
-        print(prompt)
-
-        if self.transform:
-            image = self.transform(image)
-        batch=(image, torch.tensor(self.reward, dtype=torch.float16), prompt,{},"")
-        return batch
-
-class ImagePickaPicDatasetHugging(Dataset):
-    def __init__(self,  image_folder="yuvalkirstain/pickapic_v2",transform=None,reward=100,length=5000):
-
-        self.dataset= load_dataset(image_folder,streaming=True)['train']
-        self.it=iter(self.dataset)
-        self.transform = transform
-        self.index=0
-        self.length=length
-        self.score=reward
-        self.item=None
-        self.data={}
-    def __len__(self):
-        return self.length
-
-    def __getitem__(self, idx):
-        print(f"get item dataset pickapic {idx}")
-        if idx in self.data.keys():
-          return self.data[idx]
-        try_load=True
-        while try_load:
-            self.item=next(self.it)
-            print(f"in getitem {self.item['caption']}")
-            img_name=None
-            if int(self.item['label_0'])==1:
-              img_name='jpg_0'
-            if int(self.item['label_1'])==1:
-              img_name='jpg_1'
-            if img_name:
-              try:
-                image=Image.open(io.BytesIO(self.item[img_name])).convert("RGB") 
-                try_load=False
-              except:
-                try_load=True              
-
-        if self.transform:
-            image = self.transform(image)
-
-        prompt =self.item['caption']
-        batch=(image, torch.tensor(self.score, dtype=torch.float16), prompt,{},"NA")
-        self.data[idx]=batch    
-        print(f"get item dataset pickapic {idx} caption {prompt}")
-
-        return batch
 
 def collate_fn(batch):
     return tuple(zip(*batch))
@@ -481,27 +268,32 @@ if __name__ == "__main__":
 
     print(f' ddo_config {o2o_config}' )
     print("-------------------------------------------------")
+    print(f' args {args}' )
 
-    print(args)
 
 
     match o2o_config.dataset_index:
       case 0:
-        dataset=ImageLionDatasetHugging(transform=transform,length=5000)
+        dataset=ImageLionArtDatasetHugging(transform=transform,length=20000,reward=100)
       case 1:
-        # all score csv
         data_folder='./inputs/An_extremely_beautiful_Asian_girl_v1/'
-        csv_file=data_folder+'data.csv'
-        dataset=ImageScoreDatasetScore(csv_file=csv_file, image_folder=data_folder,transform=transform,reward=100)
+        dataset=ImageScoreDataset(image_folder=data_folder,transform=transform,prompt="An extremely beautiful Asian girl")
       case 2:
-        dataset=ImageArtDataset(image_folder='./inputs/selected-vincent-van-gogh',transform=transform,reward=0)
+        dataset=ImageArtPaintingDataset(image_folder='./inputs/selected-vincent-van-gogh',transform=transform,reward=0)
       case 3:
-        dataset=ImagePickaPicDatasetHugging(image_folder="yuvalkirstain/pickapic_v2",transform=transform,reward=o2o_config.high_reward,length=5000)
+        dataset=ImagePickaPicDatasetHugging(image_folder="yuvalkirstain/pickapic_v2",transform=transform,reward=o2o_config.high_reward,length=60,vila_threshold=0.4)
+      case 6:
+        #   get only image with vila>5.5
+          dataset=ImageLionArtDatasetHugging(transform=transform,length=20000,reward=100,vila_threshold=0.35)         
       case 7:
         data_folder='./inputs/cellphone_data'
         dataset = ImageScoreDataset(image_folder=data_folder,transform=transform,reward=o2o_config.high_reward,prompt="A man and woman using their cellphones, photograph")
+      case 9:
+        data_folder='./inputs/An_extremely_beautiful_Asian_girl_v1/'
+        csv_file=data_folder+'data.csv'
+        dataset=ImageScoreDatasetCSV(csv_file=csv_file,image_folder=data_folder)
       case _:
-        dataset=ImageLionDatasetHugging(transform=transform,length=5000)
+        dataset=ImageLionArtDatasetHugging(transform=transform,length=5000)
 
     print("------------------------------------------------------------------------")
     print("Starting loading pipline -----------------------------------------------")
@@ -514,7 +306,7 @@ if __name__ == "__main__":
       pipeline.sd_pipeline.load_lora_weights(args.load_folder)
 
     print("------------------------------------------------------------------------")
-    print("Instance trainer       -----------------------------------------------")
+    print("Creating trainer       -----------------------------------------------")
     trainer = O2OTrainer(
         dataset,
         o2o_config,
@@ -540,7 +332,15 @@ if __name__ == "__main__":
     off_batch=o2o_config.offpolicy_sample_batch_size
     name=f"dataset_index{o2o_config.dataset_index}_{model_note}_offbatch{off_batch}_e{num_epochs}"
     
+    print("------------------------------------------------------------------------")
+    print("Saving local    -----------------------------------------------")
+
     trainer.save_pretrained(f"./outputs/{model_note}")
+
+    print("------------------------------------------------------------------------")
+    print("Saving hub    -----------------------------------------------")
+
+
     if (args.hf_hub_model_id==""):
         print("Not load to github")
     else:
