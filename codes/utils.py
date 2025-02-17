@@ -42,6 +42,8 @@ import tensorflow as tf
 import io
 import PIL.Image as Image
 
+tf.config.list_physical_devices('GPU')
+
 if is_peft_available():
     from peft import LoraConfig, PeftConfig
 
@@ -59,7 +61,9 @@ def predict_vila_image(pil_im,model):
     b = io.BytesIO()
     pil_im.save(b, 'png')
     image_bytes = b.getvalue()
+ 
     predict_fn = model.signatures['serving_default']
+
     predictions = predict_fn(tf.constant(image_bytes))
     aesthetic_score = predictions['predictions']
     return float(aesthetic_score)

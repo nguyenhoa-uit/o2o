@@ -56,10 +56,12 @@ class O2OConfig:
 
     valid_batch_size: int=1
     """ Validation dataset batch size"""
-    valid_size: int=50
+    valid_size: int=10
 
     # 0:ImageLionArtDatasetHugging // 1: Beauti; 3:PickaPic
-    dataset_index: int=3
+    dataset_index: int=12
+
+    num_epochs: int =4
 
     sample_batch_size: int = 2
     """Batch size (per GPU!) to use for sampling."""
@@ -79,15 +81,6 @@ class O2OConfig:
     # resume_from: Optional[str] = "./outputs/checkpoint/checkpoints/checkpoint_20"
 
 
-    # train_mode: str = "contrastive"
-    # """ offpolicy or contrastive or other. Train mode"""
-
-
-    """Top-level logging directory for checkpoint saving."""
-    # hyperparameters
-
-    num_epochs: int =21
-
     resume_from: Optional[str] = "./outputs/checkpoints/checkpoint_0"
     resume_from: Optional[str] = ""
     """== checkpoin from // Resume training from a checkpoint."""
@@ -103,7 +96,6 @@ class O2OConfig:
 
     artistic_log_on: bool= True
     """Show artistic score on wandb"""
-
 
     shuffle_inner: bool= False
     """Shuffling the samples in inner RL step """

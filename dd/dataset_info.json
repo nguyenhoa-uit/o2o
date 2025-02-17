@@ -1,0 +1,63 @@
+{
+  "builder_name": "json",
+  "citation": "",
+  "config_name": "default",
+  "dataset_name": "test_csv_laion.hf",
+  "dataset_size": 63,
+  "description": "",
+  "download_checksums": {
+    "D:/THESIS/thesis/rl_thesis/outputs/test_csv_laion.hf/train/state.json": {
+      "num_bytes": 262,
+      "checksum": null
+    }
+  },
+  "download_size": 262,
+  "features": {
+    "_data_files": [
+      {
+        "filename": {
+          "dtype": "string",
+          "_type": "Value"
+        }
+      }
+    ],
+    "_fingerprint": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "_format_columns": {
+      "dtype": "null",
+      "_type": "Value"
+    },
+    "_format_kwargs": {},
+    "_format_type": {
+      "dtype": "null",
+      "_type": "Value"
+    },
+    "_output_all_columns": {
+      "dtype": "bool",
+      "_type": "Value"
+    },
+    "_split": {
+      "dtype": "string",
+      "_type": "Value"
+    }
+  },
+  "homepage": "",
+  "license": "",
+  "size_in_bytes": 325,
+  "splits": {
+    "train": {
+      "name": "train",
+      "num_bytes": 63,
+      "num_examples": 1,
+      "dataset_name": "test_csv_laion.hf"
+    }
+  },
+  "version": {
+    "version_str": "0.0.0",
+    "major": 0,
+    "minor": 0,
+    "patch": 0
+  }
+}

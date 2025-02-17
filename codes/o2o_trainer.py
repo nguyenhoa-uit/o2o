@@ -34,7 +34,7 @@ from codes.utils import PerPromptStatTracker
 import tensorflow_hub as hub
 from torchvision.transforms import functional as F
 from codes.utils import predict_vila_image
-
+import tensorflow as tf
 logger = get_logger(__name__)
 
 
@@ -92,8 +92,9 @@ class O2OTrainer(BaseTrainer):
         self.reward_fn = reward_function
         self.config = config
         self.image_samples_callback = image_samples_hook
+        self.dataset=dataset
 
-        self.dataset_train, self.dataset_val = torch.utils.data.random_split(dataset, (dataset.__len__()-config.valid_size, config.valid_size))
+        self.dataset_train, self.dataset_val = torch.utils.data.random_split(self.dataset, (self.dataset.__len__()-config.valid_size, config.valid_size))
 
         if config.offpolicy_sample_batch_size>0:
           self.dataloader_train = DataLoader(self.dataset_train, batch_size=config.offpolicy_sample_batch_size)
@@ -241,8 +242,7 @@ class O2OTrainer(BaseTrainer):
         if pass_image>0:
           print(f"checkpoint image pass {pass_image}")
         self.vila_model=hub.load('https://tfhub.dev/google/vila/image/1')
-
-
+        tf.config.list_physical_devices('GPU')
 
 
 
@@ -255,15 +255,12 @@ class O2OTrainer(BaseTrainer):
             epochs = self.config.num_epochs
         
         for epoch in range(self.first_epoch, epochs):
-
             print("\n")
             print("------------------------------------------------------------------------")
             print(f"Starting epoch {epoch} ----------------------------------------------- \n")
             global_step = self.step(epoch, global_step)
 
-
     def step(self, epoch: int, global_step: int):
-
 
         samples, prompt_image_data = self._generate_samples_with_mode(
             iterations=self.config.sample_num_batches_per_epoch,

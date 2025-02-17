@@ -41,7 +41,7 @@ from torchvision import transforms
 import math
 from torchvision.transforms import functional as F
 
-from codes.used_dataset import ImageLionArtDatasetHugging, ImageArtPaintingDataset,ImagePickaPicDatasetHugging, ImageScoreDataset, ImageScoreDatasetCSV
+from codes.used_dataset import SelectedPickaPic,FilteredLaionArt,ImageLionArtDatasetHugging, ImageArtPaintingDataset,ImagePickaPicDatasetHugging, ImageScoreDataset, ImageScoreDatasetCSV
 
 def jpeg_incompressibility():
     def _fn(images, prompts, metadata):
@@ -72,7 +72,6 @@ animals = [
     "rabbit",
     "zebra"
 ]
-
 
 
 class AestheticScorer(torch.nn.Module):
@@ -196,7 +195,6 @@ class MLP(nn.Module):
         return self.layers(embed)
 
 
-
 def collate_fn(batch):
     return tuple(zip(*batch))
     
@@ -244,7 +242,6 @@ class ScriptArguments:
     )
 
 
-
 if __name__ == "__main__":
     parser = HfArgumentParser((ScriptArguments, O2OConfig))
     args, o2o_config = parser.parse_args_into_dataclasses(return_remaining_strings=True)[:2]
@@ -270,18 +267,22 @@ if __name__ == "__main__":
     print("-------------------------------------------------")
     print(f' args {args}' )
 
+    fn_reward=aesthetic_scorer(args.hf_hub_aesthetic_model_id, args.hf_hub_aesthetic_model_filename)
+
+
+
 
 
     match o2o_config.dataset_index:
       case 0:
-        dataset=ImageLionArtDatasetHugging(transform=transform,length=20000,reward=100)
+        dataset=ImageLionArtDatasetHugging(transform=transform,length=5000000,reward=100,vila_threshold=0.63)
       case 1:
         data_folder='./inputs/An_extremely_beautiful_Asian_girl_v1/'
         dataset=ImageScoreDataset(image_folder=data_folder,transform=transform,prompt="An extremely beautiful Asian girl")
       case 2:
         dataset=ImageArtPaintingDataset(image_folder='./inputs/selected-vincent-van-gogh',transform=transform,reward=0)
       case 3:
-        dataset=ImagePickaPicDatasetHugging(image_folder="yuvalkirstain/pickapic_v2",transform=transform,reward=o2o_config.high_reward,length=60,vila_threshold=0.4)
+        dataset=ImagePickaPicDatasetHugging(image_folder="yuvalkirstain/pickapic_v2",transform=transform,reward=o2o_config.high_reward,length=5000000,vila_threshold=0.65,art_threshold=7.5,art_model=fn_reward)
       case 6:
         #   get only image with vila>5.5
           dataset=ImageLionArtDatasetHugging(transform=transform,length=20000,reward=100,vila_threshold=0.35)         
@@ -292,56 +293,88 @@ if __name__ == "__main__":
         data_folder='./inputs/An_extremely_beautiful_Asian_girl_v1/'
         csv_file=data_folder+'data.csv'
         dataset=ImageScoreDatasetCSV(csv_file=csv_file,image_folder=data_folder)
+      case 11:
+        dataset= FilteredLaionArt(data_file="hoan17/test_csv_laion",transform=transform,reward=o2o_config.high_reward)
+      case 12:
+        dataset= SelectedPickaPic(transform=transform,reward=o2o_config.high_reward) 
+    
       case _:
         dataset=ImageLionArtDatasetHugging(transform=transform,length=5000)
 
     print("------------------------------------------------------------------------")
     print("Starting loading pipline -----------------------------------------------")
 
-
-    pipeline = DefaultO2OStableDiffusionPipeline(
-        args.pretrained_model, pretrained_model_revision=args.pretrained_revision, use_lora=args.use_lora
-    )
-    if (args.load_folder!=''):
-      pipeline.sd_pipeline.load_lora_weights(args.load_folder)
-
-    print("------------------------------------------------------------------------")
-    print("Creating trainer       -----------------------------------------------")
-    trainer = O2OTrainer(
-        dataset,
-        o2o_config,
-        aesthetic_scorer(args.hf_hub_aesthetic_model_id, args.hf_hub_aesthetic_model_filename),
-        prompt_fn,
-        pipeline,
-        image_samples_hook=image_outputs_logger,
-    )
-    print("\n")
-    print("------------------------------------------------------------------------")
-    print("Starting training        -----------------------------------------------")
-
-
-    epochs=o2o_config.num_epochs
-    trainer.train(epochs=epochs)
-
-    print("\n")
-    print("------------------------------------------------------------------------")
-    print("Starting saving model    -----------------------------------------------")
-
-    model_note=o2o_config.huggingface_note
-    num_epochs=o2o_config.global_step+o2o_config.num_epochs
-    off_batch=o2o_config.offpolicy_sample_batch_size
-    name=f"dataset_index{o2o_config.dataset_index}_{model_note}_offbatch{off_batch}_e{num_epochs}"
     
-    print("------------------------------------------------------------------------")
-    print("Saving local    -----------------------------------------------")
+    test_mode=False
+  
 
-    trainer.save_pretrained(f"./outputs/{model_note}")
+    if test_mode:
+        dataset=ImagePickaPicDatasetHugging(image_folder="yuvalkirstain/pickapic_v2",transform=transform,reward=o2o_config.high_reward,length=10000,vila_threshold=0.60,art_threshold=7.0,art_model=fn_reward)        
+        dataloader_train = DataLoader(dataset, batch_size=1)
 
-    print("------------------------------------------------------------------------")
-    print("Saving hub    -----------------------------------------------")
+        dataloader_train_iter=iter(dataloader_train)
+        for epoch in range(50):
+            next(dataloader_train_iter)
+            if epoch%10==0:
+                dataset.save_csv(f"./outputs/art_1100_6vila_7art_{epoch}p4.csv")
+        
 
-
-    if (args.hf_hub_model_id==""):
-        print("Not load to github")
+        # dataset=ImageLionArtDatasetHugging(transform=transform,length=5000000,reward=100,vila_threshold=0.63)
+        # dataloader_train = DataLoader(dataset, batch_size=1)
+        # dataloader_train_iter=iter(dataloader_train)
+        # for epoch in range(1100):
+        #     next(dataloader_train_iter)
+        #     if epoch%50==49:
+        #         dataset.save_csv(f"./outputs/art_{epoch}.csv")
+        # dataset.save_csv(f"./outputs/art_1100.csv")
     else:
-      trainer.push_to_hub(model_note)
+        pipeline = DefaultO2OStableDiffusionPipeline(
+            args.pretrained_model, pretrained_model_revision=args.pretrained_revision, use_lora=args.use_lora
+        )
+
+        if (args.load_folder!=''):
+            pipeline.sd_pipeline.load_lora_weights(args.load_folder)
+
+
+    
+        print("------------------------------------------------------------------------")
+        print("Creating trainer       -----------------------------------------------")
+        
+        trainer = O2OTrainer(
+            dataset,
+            o2o_config,
+            fn_reward,
+            prompt_fn,
+            pipeline,
+            image_samples_hook=image_outputs_logger,
+        )
+        print("\n")
+        print("------------------------------------------------------------------------")
+        print("Starting training        -----------------------------------------------")
+
+
+        epochs=o2o_config.num_epochs
+        trainer.train(epochs=epochs)
+
+        print("\n")
+        print("------------------------------------------------------------------------")
+        print("Starting saving model    -----------------------------------------------")
+
+        model_note=o2o_config.huggingface_note
+        num_epochs=o2o_config.global_step+o2o_config.num_epochs
+        off_batch=o2o_config.offpolicy_sample_batch_size
+        name=f"dataset_index{o2o_config.dataset_index}_{model_note}_offbatch{off_batch}_e{num_epochs}"
+        
+        print("------------------------------------------------------------------------")
+        print("Saving local    -----------------------------------------------")
+
+        trainer.save_pretrained(f"./outputs/{model_note}")
+
+        print("------------------------------------------------------------------------")
+        print("Saving hub    -----------------------------------------------")
+
+
+        if (args.hf_hub_model_id==""):
+            print("Not load to github")
+        else:
+            trainer.push_to_hub(model_note)
