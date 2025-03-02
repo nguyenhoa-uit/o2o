@@ -40,7 +40,6 @@ from torchvision import transforms
 
 import math
 from torchvision.transforms import functional as F
-
 from codes.used_dataset import SelectedPickaPic,FilteredLaionArt,ImageLionArtDatasetHugging, ImageArtPaintingDataset,ImagePickaPicDatasetHugging, ImageScoreDataset, ImageScoreDatasetCSV
 
 def jpeg_incompressibility():
@@ -105,7 +104,6 @@ class AestheticScorer(torch.nn.Module):
         embed = embed / torch.linalg.vector_norm(embed, dim=-1, keepdim=True)
         return self.mlp(embed).squeeze(1)
 
-
 def aesthetic_scorer(hub_model_id, model_filename):
     scorer = AestheticScorer(
         model_id=hub_model_id,
@@ -125,7 +123,6 @@ def aesthetic_scorer(hub_model_id, model_filename):
         return scores, {}
 
     return _fn
-
 
 
 def prompt_fn():
@@ -271,8 +268,6 @@ if __name__ == "__main__":
 
 
 
-
-
     match o2o_config.dataset_index:
       case 0:
         dataset=ImageLionArtDatasetHugging(transform=transform,length=5000000,reward=100,vila_threshold=0.63)
@@ -299,7 +294,7 @@ if __name__ == "__main__":
         dataset= SelectedPickaPic(transform=transform,reward=o2o_config.high_reward) 
     
       case _:
-        dataset=ImageLionArtDatasetHugging(transform=transform,length=5000)
+        dataset= SelectedPickaPic(transform=transform,reward=o2o_config.high_reward) 
 
     print("------------------------------------------------------------------------")
     print("Starting loading pipline -----------------------------------------------")
@@ -318,15 +313,6 @@ if __name__ == "__main__":
             if epoch%10==0:
                 dataset.save_csv(f"./outputs/art_1100_6vila_7art_{epoch}p4.csv")
         
-
-        # dataset=ImageLionArtDatasetHugging(transform=transform,length=5000000,reward=100,vila_threshold=0.63)
-        # dataloader_train = DataLoader(dataset, batch_size=1)
-        # dataloader_train_iter=iter(dataloader_train)
-        # for epoch in range(1100):
-        #     next(dataloader_train_iter)
-        #     if epoch%50==49:
-        #         dataset.save_csv(f"./outputs/art_{epoch}.csv")
-        # dataset.save_csv(f"./outputs/art_1100.csv")
     else:
         pipeline = DefaultO2OStableDiffusionPipeline(
             args.pretrained_model, pretrained_model_revision=args.pretrained_revision, use_lora=args.use_lora
@@ -344,7 +330,6 @@ if __name__ == "__main__":
             dataset,
             o2o_config,
             fn_reward,
-            prompt_fn,
             pipeline,
             image_samples_hook=image_outputs_logger,
         )

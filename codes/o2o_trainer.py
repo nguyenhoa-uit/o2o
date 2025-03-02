@@ -31,10 +31,12 @@ from codes.modeling_sd_base import O2OStableDiffusionPipeline
 from codes.base import BaseTrainer
 from codes.o2o_config import O2OConfig
 from codes.utils import PerPromptStatTracker
-import tensorflow_hub as hub
 from torchvision.transforms import functional as F
+
 from codes.utils import predict_vila_image
 import tensorflow as tf
+import tensorflow_hub as hub
+
 logger = get_logger(__name__)
 
 
@@ -60,7 +62,8 @@ This is a diffusion model that has been fine-tuned with reinforcement learning t
 class O2OTrainer(BaseTrainer):
     """
     The O2OTrainer uses Deep Diffusion Policy Optimization to optimise diffusion models.
-    Note, this trainer is heavily inspired by the work here: https://github.com/hoan.17/o2o-pytorch
+    Note, this trainer is heavily inspired by the w
+    ork here: https://github.com/hoan.17/o2o-pytorch
     As of now only Stable Diffusion based pipelines are supported
 
     Attributes:
@@ -81,32 +84,21 @@ class O2OTrainer(BaseTrainer):
         dataset: Dataset,
         config: O2OConfig,
         reward_function: Callable[[torch.Tensor, Tuple[str], Tuple[Any]], torch.Tensor],
-        prompt_function: Callable[[], Tuple[str, Any]],
         sd_pipeline: O2OStableDiffusionPipeline,
         image_samples_hook: Optional[Callable[[Any, Any, Any], Any]] = None,
     ):
         if image_samples_hook is None:
             warn("No image_samples_hook provided; no images will be logged")
 
-        self.prompt_fn = prompt_function
         self.reward_fn = reward_function
         self.config = config
         self.image_samples_callback = image_samples_hook
-        self.dataset=dataset
 
-        self.dataset_train, self.dataset_val = torch.utils.data.random_split(self.dataset, (self.dataset.__len__()-config.valid_size, config.valid_size))
-
-        if config.offpolicy_sample_batch_size>0:
-          self.dataloader_train = DataLoader(self.dataset_train, batch_size=config.offpolicy_sample_batch_size)
-          self.dataloader_val = DataLoader(self.dataset_val, batch_size=config.valid_batch_size)
-          self.dataloader_train_iter=iter(self.dataloader_train)
-          self.dataloader_val_iter=iter(self.dataloader_val)
-        else:
-          self.dataloader_train= None
-          self.dataloader_val = None
-          self.dataloader_train_iter=None
-          self.dataloader_val_iter=None
-
+        # self.dataset_train, self.dataset_val = torch.utils.data.random_split(self.dataset, (self.dataset.__len__()-config.valid_size, config.valid_size))
+        self.dataset,_= torch.utils.data.random_split(dataset, (config.usage_dataset_size,dataset.__len__()- config.usage_dataset_size))
+        self.dataloader = DataLoader(self.dataset, batch_size=config.offpolicy_sample_batch_size)
+        # self.dataloader_val = DataLoader(self.dataset_val, batch_size=config.valid_batch_size)
+        self.dataloader_iter=iter(self.dataloader)
 
         accelerator_project_config = ProjectConfiguration(**self.config.project_kwargs)
 
@@ -235,9 +227,9 @@ class O2OTrainer(BaseTrainer):
 
     # pass trained image in checkpoint
         pass_image=0
-        if self.dataloader_train_iter:
+        if self.dataloader_iter:
           while pass_image<config.pass_images:
-            next(self.dataloader_train_iter)
+            next(self.dataloader_iter)
             pass_image+=1
         if pass_image>0:
           print(f"checkpoint image pass {pass_image}")
@@ -261,57 +253,47 @@ class O2OTrainer(BaseTrainer):
             global_step = self.step(epoch, global_step)
 
     def step(self, epoch: int, global_step: int):
+        sample_batch_size= self.config.offpolicy_sample_batch_size*(1+self.config.online_mulitfication_number)
 
-        samples, prompt_image_data = self._generate_samples_with_mode(
+        samples, prompt_image_data,vila_score = self._generate_samples_both(
             iterations=self.config.sample_num_batches_per_epoch,
-            batch_size=self.config.sample_batch_size,
+            batch_size=sample_batch_size,
             offpolicy_batch_size=self.config.offpolicy_sample_batch_size,
         )
 
-        if self.config.reward_function_usage:
-            rewards, rewards_metadata = self.compute_rewards(
-                prompt_image_data, is_async=self.config.async_reward_computation
-            )
-        else:
-            rewards=tuple([i['rewards'] for i in samples])
-            rewards_metadata=tuple([{} for i in range(self.config.sample_num_batches_per_epoch)])
-            samples = {k: torch.cat([s[k] for s in samples]) for k in samples[0].keys()}
+        rewards=tuple([i['rewards'] for i in samples])
+        rewards_metadata=tuple([{} for i in range(self.config.sample_num_batches_per_epoch)])
+        samples = {k: torch.cat([s[k] for s in samples]) for k in samples[0].keys()}
         # rewards_log about art function.
-        
-        if self.config.artistic_log_on:
-          rewards_log, _ = self.compute_rewards(
+        print(rewards)
+
+        if self.config.show_metrics:
+            rewards_log, _ = self.compute_aesthetic(
               prompt_image_data, is_async=self.config.async_reward_computation
           )
+        else:
+            rewards_log=1
         
-        print(rewards)
         # prompt_image_data = iteration x bachsize
-
         images, prompts, _ = prompt_image_data[-1]
-        vila_r_first=predict_vila_image(F.to_pil_image(images[0], mode=None),self.vila_model)
-        vila_r_last=predict_vila_image(F.to_pil_image(images[-1], mode=None),self.vila_model)
+
 
         for i, image_data in enumerate(prompt_image_data):
             image_data.extend([rewards[i], rewards_metadata[i]])
 
 
-
         if self.image_samples_callback is not None:
             self.image_samples_callback(prompt_image_data, global_step, self.accelerator.trackers[0],caption='main')
 
-
-
-
         rewards = torch.cat(rewards)
         
-
         rewards = self.accelerator.gather(rewards).cpu().numpy()
-        if self.config.artistic_log_on:
+        if self.config.show_metrics:
           rewards_log = torch.cat(rewards_log)
           rewards_log = self.accelerator.gather(rewards_log).cpu().numpy()
           rewards_log=rewards_log.mean()
         else:
           rewards_log=rewards.mean()
-
 
         if self.config.per_prompt_stat_tracking:
             prompt_ids = self.accelerator.gather(samples["prompt_ids"]).cpu().numpy()
@@ -326,7 +308,6 @@ class O2OTrainer(BaseTrainer):
             .reshape(self.accelerator.num_processes, -1)[self.accelerator.process_index]
             .to(self.accelerator.device)
         )
-
 
         del samples["prompt_ids"]
 
@@ -374,17 +355,14 @@ class O2OTrainer(BaseTrainer):
                 raise ValueError(
                     "Optimization step should have been performed by this point. Please check calculated gradient accumulation settings."
                 )
-            
-        log_valid_value=self.compute_valid_logprob(batch_size=self.config.valid_batch_size)
+ 
         self.accelerator.log(
             {
                 "artistic_score": rewards_log,
                 "epoch": epoch,
                 "reward_mean": rewards.mean(),
                 "reward_std": rewards.std(),
-                "validation_logprob": log_valid_value,
-                "vila_r_first": vila_r_first,
-                "vila_r_last": vila_r_last,
+                "vila_score": vila_score,
 
             },
             step=global_step,
@@ -398,67 +376,68 @@ class O2OTrainer(BaseTrainer):
             print('checkpoint saving error')
         return global_step
 
-    def compute_valid_logprob(self,batch_size):
-        log_probs=self._generate_samples_offline_valid(
-        batch_size=batch_size
-        ) 
-        return log_probs
+    def _get_next_iter(self):
+        next_iter=next(self.dataloader_iter)
 
-    def _generate_samples_with_mode(self,iterations, batch_size,offpolicy_batch_size):
+        if len(next_iter[0])==self.config.offpolicy_sample_batch_size:
+            return next_iter
+        else:
+            self.dataloader_iter=iter(self.dataloader)
+            pass_image=0
+            while pass_image<self.config.pass_images:
+                next(self.dataloader_iter)
+                pass_image+=1
+            if pass_image>0:
+                print(f"checkpoint image pass {pass_image}")
+
+            return next(self.dataloader_iter)
+            
+
+
+    def _generate_samples_both(self,iterations, batch_size,offpolicy_batch_size):
         onpolicy_batch_size=batch_size-offpolicy_batch_size
-        if offpolicy_batch_size==0:
-            if self.config.reward_function_usage:
-                return self._generate_samples(
-                iterations=self.config.sample_num_batches_per_epoch,
-                batch_size=onpolicy_batch_size,
-            )
-            else:  
-                prompts=prompts_offline[:onpolicy_batch_size]
-    
-                return self._generate_samples_onpolicy(
-                iterations=iterations,
-                batch_size=onpolicy_batch_size,
-                prompts=prompts,
-                    )
-        if onpolicy_batch_size==0:
-            try:
-              train_iter=next(self.dataloader_train_iter)
-            except StopIteration:
-              self.dataloader_train_iter=iter(self.dataloader_train)
-              train_iter=next(self.dataloader_train_iter)
-            samples, prompt_image_pairs,prompts= self._generate_samples_offline(
-        iterations=iterations,
-        batch_size=offpolicy_batch_size,
-        next_train_iter=train_iter
-        ) 
-            return samples, prompt_image_pairs
+        # if offpolicy_batch_size==0:
+ 
+        #     prompts=prompts_offline[:onpolicy_batch_size]
 
-        try:
-            train_iter=next(self.dataloader_train_iter)
-        except StopIteration:
-            self.dataloader_train_iter=iter(self.dataloader_train)
-            train_iter=next(self.dataloader_train_iter)
+        #     return self._generate_samples_onpolicy(
+        #     iterations=iterations,
+        #     batch_size=onpolicy_batch_size,
+        #     prompts=prompts,
+        #         )
+        # if onpolicy_batch_size==0:      
+        #     train_iter=self._get_next_iter()
+        #     samples, prompt_image_pairs,prompts= self._generate_samples_offline(
+        # iterations=iterations,
+        # batch_size=offpolicy_batch_size,
+        # next_train_iter=train_iter
+        # ) 
+        #     return samples, prompt_image_pairs
+
+        # try:
+        #     train_iter=next(self.dataloader_iter)
+        # except StopIteration:
+        #     self.dataloader_iter=iter(self.dataloader)
+        #     train_iter=next(self.dataloader_iter)
+        train_iter=self._get_next_iter()
         off_samples, off_prompt_image_pairs,prompts_offline=self._generate_samples_offline(
         iterations=iterations,
         batch_size=offpolicy_batch_size,
         next_train_iter=train_iter
         ) 
-                        
-        if self.config.reward_function_usage:
-            on_samples, on_prompt_image_pairs= self._generate_samples(
-            iterations=self.config.sample_num_batches_per_epoch,
-            batch_size=onpolicy_batch_size,
-        )
-        else:  
-            prompts=[prompts_offline[0] for i in range(onpolicy_batch_size)]
+    
+        prompts=[prompts_offline[0] for i in range(onpolicy_batch_size)]
 
-
-            on_samples, on_prompt_image_pairs= self._generate_samples_onpolicy(
-            iterations=iterations,
-            batch_size=onpolicy_batch_size,
-            prompts=prompts,
-                ) 
-
+        on_samples, on_prompt_image_pairs= self._generate_samples_onpolicy(
+        iterations=iterations,
+        batch_size=onpolicy_batch_size,
+        prompts=prompts,
+            )
+        if self.config.show_metrics:
+            vila_list=[sample["vila_avg"] for sample in on_samples]
+            vila_score=float(sum(vila_list)/len(vila_list))
+        else:
+            vila_score=0
 
         off_samples=[{k:torch.cat((off_samples[ix][k],on_samples[ix][k])) for k in off_samples[0].keys()} for ix in range(len(off_samples))]
 
@@ -474,7 +453,7 @@ class O2OTrainer(BaseTrainer):
             off_prompt_image_pairs[ix][0]=torch.cat((off_prompt_image_pairs[ix][0],on_prompt_image_pairs[ix][0]))
 
             
-        return off_samples,off_prompt_image_pairs
+        return off_samples,off_prompt_image_pairs,vila_score
         
             
     def _generate_samples_onpolicy(self, iterations, batch_size,prompts):
@@ -516,6 +495,17 @@ class O2OTrainer(BaseTrainer):
                 latents=sd_output.latents
                 log_probs=sd_output.log_probs
 
+                    # prompt_image_data = iteration x bachsize
+
+            if self.config.show_metrics:
+                vila_list=[predict_vila_image(F.to_pil_image(img, mode=None),self.vila_model) for img in images]
+                vila_avg=float(sum(vila_list) / len(vila_list))
+            else:
+                vila_avg=float(1)
+
+
+
+
             latents = torch.stack(latents, dim=1)  # (batch_size, num_steps + 1, ...)
             log_probs = torch.stack(log_probs, dim=1)  # (batch_size, num_steps, 1)
             timesteps = self.sd_pipeline.scheduler.timesteps.repeat(batch_size, 1)  # (batch_size, num_steps)
@@ -531,6 +521,7 @@ class O2OTrainer(BaseTrainer):
                     "next_latents": latents[:, 1:],  # each entry is the latent after timestep t
                     "log_probs": log_probs,
                     "rewards": rewards,
+                    "vila_avg":vila_avg,
                     "negative_prompt_embeds": sample_neg_prompt_embeds,
                 }
             )
@@ -540,74 +531,6 @@ class O2OTrainer(BaseTrainer):
         return samples, prompt_image_pairs
 
 
-    def _generate_samples_offline_valid(self, batch_size):
-        """
-        Generate samples from the model
-
-        Args:
-            iterations (int): Number of iterations to generate samples for
-            batch_size (int): Batch size to use for sampling
-
-        Returns:
-            samples (List[Dict[str, torch.Tensor]]), prompt_image_pairs (List[List[Any]])
-        """
-
-        samples = []
-        prompt_image_pairs = []
-        if batch_size==0:
-            return samples, prompt_image_pairs,[]
-        self.sd_pipeline.unet.eval()
-
-        sample_neg_prompt_embeds = self.neg_prompt_embed.repeat(batch_size, 1, 1)
-   
-        
-
-        prompts, prompt_metadata = zip(*[self.prompt_fn() for _ in range(batch_size)])
-
-        try:
-            n=next(self.dataloader_val_iter)
-        except StopIteration:
-            self.dataloader_val_iter=iter(self.dataloader_val)
-            n=next(self.dataloader_val_iter)
-        images_offline,scores_offline,prompts,_,img_name=n[0],n[1],n[2],n[3],n[4]
-
-        if self.config.reward_function_usage:
-            prompts, prompt_metadata = zip(*[self.prompt_fn() for _ in range(batch_size)])
-        else:
-            prompt_metadata=tuple([{} for i in range(batch_size)])
-
-
-        prompt_ids = self.sd_pipeline.tokenizer(
-            prompts,
-            return_tensors="pt",
-            padding="max_length",
-            truncation=True,
-            max_length=self.sd_pipeline.tokenizer.model_max_length,
-        ).input_ids.to(self.accelerator.device)
-        prompt_embeds = self.sd_pipeline.text_encoder(prompt_ids)[0]
-
-        with self.autocast():
-
-            sd_output = self.sd_pipeline.call_offline(
-                images_offline=images_offline,
-                prompt_embeds=prompt_embeds,
-                negative_prompt_embeds=sample_neg_prompt_embeds,
-                num_inference_steps=self.config.sample_num_steps,
-                guidance_scale=self.config.sample_guidance_scale,
-                eta=self.config.sample_eta,
-                output_type="pt",
-                height=self.config.resolution,width=self.config.resolution,
-
-            )
-
-            images = sd_output.images
-            latents = sd_output.latents
-            log_probs = sd_output.log_probs
-
-        log_probs = torch.stack(log_probs, dim=1)  # (batch_size, num_steps, 1)
-           
-        return float(torch.mean(log_probs))
-    
 
     def _generate_samples_offline(self, iterations, batch_size,next_train_iter):
         """
@@ -633,15 +556,12 @@ class O2OTrainer(BaseTrainer):
 
         for _ in range(iterations):
 
-            _, prompt_metadata = zip(*[self.prompt_fn() for _ in range(batch_size)])
+            prompt_metadata = zip(*[{} for _ in range(batch_size)])
 
             images_offline,scores_offline,prompts,_,img_name=next_train_iter[0],next_train_iter[1],next_train_iter[2],next_train_iter[3],next_train_iter[4]
             print(prompts)
 
-            if self.config.reward_function_usage:
-                prompts, prompt_metadata = zip(*[self.prompt_fn() for _ in range(batch_size)])
-            else:
-                prompt_metadata=tuple([{} for i in range(batch_size)])
+            prompt_metadata=tuple([{} for i in range(batch_size)])
 
 
             prompt_ids = self.sd_pipeline.tokenizer(
@@ -704,7 +624,7 @@ class O2OTrainer(BaseTrainer):
         return samples, prompt_image_pairs,prompts
     
     # Compute arstistic score with self.reward_fn
-    def compute_rewards(self, prompt_image_pairs, is_async=False):
+    def compute_aesthetic(self, prompt_image_pairs, is_async=False):
         if not is_async:
             rewards = []
             for images, prompts, prompt_metadata in prompt_image_pairs:
@@ -924,7 +844,7 @@ class O2OTrainer(BaseTrainer):
         sample_neg_prompt_embeds = self.neg_prompt_embed.repeat(batch_size, 1, 1)
 
         for _ in range(iterations):
-            prompts, prompt_metadata = zip(*[self.prompt_fn() for _ in range(batch_size)])
+            prompts, prompt_metadata = zip(*[{} for _ in range(batch_size)])
 
             prompt_ids = self.sd_pipeline.tokenizer(
                 prompts,
@@ -978,83 +898,11 @@ class O2OTrainer(BaseTrainer):
 
         return samples, prompt_image_pairs
     
-    def _generate_samples_bk(self, iterations, batch_size):
-        """
-        Generate samples from the model
-
-        Args:
-            iterations (int): Number of iterations to generate samples for
-            batch_size (int): Batch size to use for sampling
-
-        Returns:
-            samples (List[Dict[str, torch.Tensor]]), prompt_image_pairs (List[List[Any]])
-        """
-        samples = []
-        prompt_image_pairs = []
-        self.sd_pipeline.unet.eval()
-
-        sample_neg_prompt_embeds = self.neg_prompt_embed.repeat(batch_size, 1, 1)
-
-        for _ in range(iterations):
-            prompts, prompt_metadata = zip(*[self.prompt_fn() for _ in range(batch_size)])
-
-            prompt_ids = self.sd_pipeline.tokenizer(
-                prompts,
-                return_tensors="pt",
-                padding="max_length",
-                truncation=True,
-                max_length=self.sd_pipeline.tokenizer.model_max_length,
-            ).input_ids.to(self.accelerator.device)
-            prompt_embeds = self.sd_pipeline.text_encoder(prompt_ids)[0]
-
-            with self.autocast():
-                sd_output = self.sd_pipeline(
-                    prompt_embeds=prompt_embeds,
-                    negative_prompt_embeds=sample_neg_prompt_embeds,
-                    num_inference_steps=self.config.sample_num_steps,
-                    guidance_scale=self.config.sample_guidance_scale,
-                    eta=self.config.sample_eta,
-                    output_type="pt",
-                    height=self.config.sample_guidance_scale,width=self.config.sample_guidance_scale,
-                )
-
-              
-
-                images = sd_output.images
-                latents = sd_output.latents
-                log_probs = sd_output.log_probs
-
-            latents = torch.stack(latents, dim=1)  # (batch_size, num_steps + 1, ...)
-            log_probs = torch.stack(log_probs, dim=1)  # (batch_size, num_steps, 1)
-            timesteps = self.sd_pipeline.scheduler.timesteps.repeat(batch_size, 1)  # (batch_size, num_steps)
-
-            rewards=[self.config.low_reward for _ in range(batch_size)]
-            rewards=torch.as_tensor(rewards).unsqueeze(dim=1)
-
-            # rewards=torch.as_tensor(rewards).unsqueeze(dim=1).repeat(1,self.config.sample_num_steps)
-
-            samples.append(
-                {
-                    "prompt_ids": prompt_ids,
-                    "prompt_embeds": prompt_embeds,
-                    "timesteps": timesteps,
-                    "latents": latents[:, :-1],  # each entry is the latent before timestep t
-                    "next_latents": latents[:, 1:],  # each entry is the latent after timestep t
-                    "log_probs": log_probs,
-                    "rewards": rewards,
-                    "negative_prompt_embeds": sample_neg_prompt_embeds,
-                }
-            )
-
-
-            prompt_image_pairs.append([images, prompts, prompt_metadata])
-
-        return samples, prompt_image_pairs
-
 
     def _config_check(self) -> Tuple[bool, str]:
+        sample_batch_size=self.config.offpolicy_sample_batch_size*(1+self.config.online_mulitfication_number)
         samples_per_epoch = (
-            self.config.sample_batch_size * self.accelerator.num_processes * self.config.sample_num_batches_per_epoch
+            sample_batch_size * self.accelerator.num_processes * self.config.sample_num_batches_per_epoch
         )
         total_train_batch_size = (
             self.config.train_batch_size
@@ -1062,15 +910,15 @@ class O2OTrainer(BaseTrainer):
             * self.config.train_gradient_accumulation_steps
         )
 
-        if not self.config.sample_batch_size >= self.config.train_batch_size:
+        if not sample_batch_size >= self.config.train_batch_size:
             return (
                 False,
-                f"Sample batch size ({self.config.sample_batch_size}) must be greater than or equal to the train batch size ({self.config.train_batch_size})",
+                f"Sample batch size ({sample_batch_size}) must be greater than or equal to the train batch size ({self.config.train_batch_size})",
             )
-        if not self.config.sample_batch_size % self.config.train_batch_size == 0:
+        if not sample_batch_size % self.config.train_batch_size == 0:
             return (
                 False,
-                f"Sample batch size ({self.config.sample_batch_size}) must be divisible by the train batch size ({self.config.train_batch_size})",
+                f"Sample batch size ({sample_batch_size}) must be divisible by the train batch size ({self.config.train_batch_size})",
             )
         if not samples_per_epoch % total_train_batch_size == 0:
             return (

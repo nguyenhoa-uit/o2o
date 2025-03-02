@@ -16,13 +16,13 @@ pipeline = DefaultO2OStableDiffusionPipeline(
 
 model='base_Stable'
 weight=None
-weight='test_VSC'
+weight="hoan17/B50"
 loop=11
 
 if weight !=None:
     model=weight
 
-    pipeline.sd_pipeline.load_lora_weights(f"./outputs/{weight}")
+    pipeline.sd_pipeline.load_lora_weights(weight)
 
 
 device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
@@ -39,7 +39,7 @@ q="Some girls are talking on grass"
 
 # b="A yellowish tiger"
 prompts = [p,p,p,q] 
-results = pipeline(prompt=prompts,height=512,width=512)
+results = pipeline(prompt=prompts,width=512,height=512)
 for prompt, image in zip(prompts,results.images):
     loop+=1
     file_name=f"./outputs/images/seed{seed}_{model}_{prompt}_{loop}.png"

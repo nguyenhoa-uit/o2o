@@ -47,16 +47,6 @@ tf.config.list_physical_devices('GPU')
 if is_peft_available():
     from peft import LoraConfig, PeftConfig
 
-def predict_vila_path(path,model):
-    pil_im = Image.open(path)
-    b = io.BytesIO()
-    pil_im.save(b, 'png')
-    image_bytes = b.getvalue()
-    predict_fn = model.signatures['serving_default']
-    predictions = predict_fn(tf.constant(image_bytes))
-    aesthetic_score = predictions['predictions']
-    return float(aesthetic_score)
-
 def predict_vila_image(pil_im,model):
     b = io.BytesIO()
     pil_im.save(b, 'png')
@@ -1187,7 +1177,6 @@ def batch_generation(
         logitss.append(logits)
     return torch.cat(query_responses, 0), torch.cat(logitss, 0)
 
-
 def add_bos_token_if_needed(
     bos_token_id: Optional[int],
     prompt_len_input_ids: int,
@@ -1208,7 +1197,6 @@ def add_bos_token_if_needed(
             rejected_tokens["prompt_input_ids"] = [bos_token_id] + rejected_tokens["prompt_input_ids"]
             rejected_tokens["prompt_attention_mask"] = [1] + rejected_tokens["prompt_attention_mask"]
     return prompt_tokens, chosen_tokens, rejected_tokens
-
 
 def add_eos_token_if_needed(
     eos_token_id: int, chosen_tokens: Dict[str, List[int]], rejected_tokens: Dict[str, List[int]]

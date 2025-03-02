@@ -241,6 +241,7 @@ class SelectedPickaPic(Dataset):
         if self.transform:
             image = self.transform(image)
         batch=(image, torch.tensor(score, dtype=torch.float16), prompt,{},"NA")
+        print(f"getitem_dataset: idx= {idx}")
         return batch
     
 class SelectedPickaPic1(Dataset):
@@ -391,7 +392,6 @@ class ImagePickaPicDatasetHugging(Dataset):
         return batch
 
 
-
 class ImageScoreDataset(Dataset):
     def __init__(self,  image_folder,transform=None,reward=100,prompt="An extremely beautiful Asian girl"):
         super().__init__()
@@ -415,6 +415,7 @@ class ImageScoreDataset(Dataset):
         if self.transform:
             image = self.transform(image)
         batch=(image, torch.tensor(score, dtype=torch.float16), prompt,{},self.data[idx])
+        print(f"item idx {idx}")
         return batch
 
 def check_size_image1(height,width): 
