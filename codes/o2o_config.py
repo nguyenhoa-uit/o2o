@@ -37,10 +37,6 @@ class O2OConfig:
     # train_learning_rate: float = 3e-4  
     train_learning_rate: float = 3e-4
     """Learning rate."""
-
-
-
-
     seed: int = 1  
     """Seed value for random generations"""
     global_step: int=0
@@ -49,32 +45,28 @@ class O2OConfig:
     """Reward for a sample picture from dataset """
     low_reward: float=50.00
     """Reward for a generated picture from model """
+    show_metrics:bool =False
+    "Image square size"
+
     resolution:int =128
     "Image square size"
-
-    show_metrics:bool =True
-    "Image square size"
-      
-    usage_dataset_size: int=5
+    usage_dataset_size: int=50
     """Number of samples in dataset to train"""
+    dataset_index: int=13
 
-    dataset_index: int=12
+    num_epochs: int =4
 
-    num_epochs: int =40
-
-    offpolicy_sample_batch_size: int = 2
+    offpolicy_sample_batch_size: int = 1
     """Batch size for offpolicy from dataset - not larger than sample_batch_size"""
 
-    online_mulitfication_number: int=2
+    online_multification_number: int=1
     """Number of online samples for 1 offline samples"""
-
     # Sample batch size must be divisible by the train batch size
-    train_batch_size: int = 3
+    train_batch_size: int =2
     """Batch size (per GPU!) to use for training."""
 
-    train_num_inner_epochs: int = 2
+    train_num_inner_epochs: int = 1
     """Number of inner epochs per outer epoch."""
-
 
     sample_num_steps: int = 7
     """Number of sampler inference steps."""
@@ -87,18 +79,12 @@ class O2OConfig:
     resume_from: Optional[str] = ""
     """== checkpoin from // Resume training from a checkpoint."""
 
-    save_freq: int = 5
+    save_freq: int = 500
     """Number of epochs between saving model checkpoints."""
 
-    huggingface_note: str = "test_laptop"
+    huggingface_note: str = "Testlap"
     """Save model note."""
 
-    pass_images:int=0
-    """Dataset passing using with checkpoint resuming"""
-
-
-    shuffle_inner: bool= True
-    """Shuffling the samples in inner RL step """
 
 # DEFAULT NO CHANGE
     mixed_precision: str = "fp16"

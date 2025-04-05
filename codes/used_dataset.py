@@ -11,6 +11,59 @@ from torchvision.transforms import functional as F
 from codes.utils import predict_vila_image
 
 
+class SelectedPickaPic(Dataset):
+    def __init__(self,  image_folder="./inputs/pick1100/", csv_file="./inputs/pick1100/pick1100.csv",transform=None,reward=100):
+        super().__init__()
+
+        self.data = pd.read_csv(csv_file)
+        self.image_folder = image_folder
+        self.transform = transform
+        self.reward=reward 
+
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        img_name = os.path.join(self.image_folder, self.data["good_jpg"][idx])
+        image = Image.open(img_name).convert('RGB')
+        prompt = self.data["prompt"][idx]
+        score=self.reward
+
+        if self.transform:
+            image = self.transform(image)
+        batch=(image, torch.tensor(score, dtype=torch.float16), prompt,{},"NA")
+        print(f"getitem_dataset: idx= {idx}")
+        return batch
+
+
+class ImageScoreDataset(Dataset):
+    def __init__(self,  image_folder,transform=None,reward=100,prompt="An extremely beautiful Asian girl"):
+        super().__init__()
+        self.data = []
+        for file in os.listdir(image_folder):
+          self.data.append(file)
+        self.image_folder = image_folder
+        self.transform = transform
+        self.reward=reward
+        self.prompt=prompt
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        img_name = os.path.join(self.image_folder, self.data[idx])
+        image = Image.open(img_name).convert('RGB')
+        prompt = self.prompt
+        score=self.reward
+
+        if self.transform:
+            image = self.transform(image)
+        batch=(image, torch.tensor(score, dtype=torch.float16), prompt,{},self.data[idx])
+        print(f"item idx {idx}")
+        return batch
+
+
 class FilteredLaionArt(Dataset):
     def __init__(self,  data_file="hoan17/test_csv_laion",transform=None,reward=100):
         super().__init__()
@@ -219,74 +272,10 @@ class ImageArtPaintingDataset(Dataset):
         return batch
 
 
-class SelectedPickaPic(Dataset):
-    def __init__(self,  image_folder="./inputs/pick1100/", csv_file="./inputs/pick1100/pick1100.csv",transform=None,reward=100):
-        super().__init__()
-
-        self.data = pd.read_csv(csv_file)
-        self.image_folder = image_folder
-        self.transform = transform
-        self.reward=reward 
-
-
-    def __len__(self):
-        return len(self.data)
-
-    def __getitem__(self, idx):
-        img_name = os.path.join(self.image_folder, self.data["good_jpg"][idx])
-        image = Image.open(img_name).convert('RGB')
-        prompt = self.data["prompt"][idx]
-        score=self.reward
-
-        if self.transform:
-            image = self.transform(image)
-        batch=(image, torch.tensor(score, dtype=torch.float16), prompt,{},"NA")
-        print(f"getitem_dataset: idx= {idx}")
-        return batch
-    
-class SelectedPickaPic1(Dataset):
-    def __init__(self,transform,  data_file="hoan17/test_csv_pick",reward=100):
-        super().__init__()
-        save_name=data_file.split("/")[-1]
-        local_save=f"./outputs/{save_name}.hf"
-
-        # try:   
-        #     print(f"loading dataset local file Laion {save_name}")
-        #     self.data= load_dataset(local_save)
-        # except:
-        #     self.data= load_dataset(data_file)
-        #     print("saving dataset Laion")
-        #     save_name=data_file.split("/")[-1]
-        #     self.data.save_to_disk(local_save)
-        self.data= load_dataset(data_file)
-      
-
-        self.data=self.data['train']
-        self.transform = transform
-        self.reward=reward
-        
-    def __len__(self):
-        return len(self.data)
-
-    def __getitem__(self, idx):
-        log_note=""
-        prompt=self.data['prompt'][idx]
-        good_jpg=self.data['good_jpg'][idx]
-        image=None
-        try:
-            image=Image.open(io.BytesIO(good_jpg)).convert("RGB") 
-            image = self.transform(image)
-        except Exception as er:
-            log_note=f'except something: er {er}'
-        print(f"Dataset Pick Item number {idx} {log_note}")
-
-        # if reward=None, set reward= aesthetic in dataset
-        batch=(image, torch.tensor(self.reward, dtype=torch.float16), prompt,{},"NA")
-        return batch
-
 
 class ImagePickaPicDatasetHugging(Dataset):
-    def __init__(self,  image_folder="yuvalkirstain/pickapic_v2",transform=None,reward=100,length=5000,vila_threshold=0.0,art_threshold=0.0,art_model=None,save_mode=False):
+    def __init__(self,  image_folder="yuvalkirstain/pickapic_v2",transform=None, \
+                 reward=100,length=5000,vila_threshold=0.0, save_mode=False):
         super().__init__()
 
         self.dataset= load_dataset(image_folder,streaming=True)['train']
@@ -302,10 +291,8 @@ class ImagePickaPicDatasetHugging(Dataset):
             self.vila_model=hub.load('https://tfhub.dev/google/vila/image/1')
         else:
             self.vila_model=None
-        self.count=1071
+        self.count=0
         self.index=-1
-        self.art_model=art_model
-        self.art_threshold=art_threshold
     def __len__(self):
         return self.length
     def save_csv(self,filename):
@@ -325,13 +312,16 @@ class ImagePickaPicDatasetHugging(Dataset):
         #   return self.data[idx]
         try_load=True
         log_note=""
-        img_name=None
         bad_image_name=None
+
         while try_load:
-   
+            img_name=None
             self.index+=1
             item=next(self.it)
-            if self.index<35793:
+
+
+            
+            if self.index<1:
                 print(f'next {self.index}')
                 continue
             prompt =item['caption']
@@ -360,16 +350,9 @@ class ImagePickaPicDatasetHugging(Dataset):
                     if vila_r<self.vila_threshold:
                         log_note=f'low vila r: {vila_r}'
                     else:
-                        if (self.art_threshold>0) and self.art_model:
-                
-                            reward, _ = self.art_model(image, None, None)
-                        else:
-                            reward=100
-                        if (float(reward)<self.art_threshold):
-                            log_note=f'arstistic score low: { float(reward)}'
-                        else:               
-                            try_load=False
-                            log_note=f'Okie vila r: {vila_r}, art score {float(reward)}'
+              
+                        try_load=False
+                        log_note=f'Okie vila r: {vila_r}'
               except Exception as er:
                 log_note=f'except something: er {er}'
             else:
@@ -379,8 +362,8 @@ class ImagePickaPicDatasetHugging(Dataset):
         good_img_filename=f"good_{self.count}.jpg"
         bad_img_filename=f"bad_{self.count}.jpg"
 
-        image_good.save(f"./outputs/pick_data_6vila_7art/{good_img_filename}")
-        image_bad.save(f"./outputs/pick_data_6vila_7art/{bad_img_filename}")
+        image_good.save(f"./outputs/pick1000/{good_img_filename}")
+        image_bad.save(f"./outputs/pick1000/{bad_img_filename}")
 
         csv_row = {"prompt":prompt,"bad_jpg":bad_img_filename, "good_jpg":good_img_filename,"origin_index":self.index}
         self.list_csv.append(csv_row)
@@ -391,32 +374,6 @@ class ImagePickaPicDatasetHugging(Dataset):
         
         return batch
 
-
-class ImageScoreDataset(Dataset):
-    def __init__(self,  image_folder,transform=None,reward=100,prompt="An extremely beautiful Asian girl"):
-        super().__init__()
-        self.data = []
-        for file in os.listdir(image_folder):
-          self.data.append(file)
-        self.image_folder = image_folder
-        self.transform = transform
-        self.reward=reward
-        self.prompt=prompt
-
-    def __len__(self):
-        return len(self.data)
-
-    def __getitem__(self, idx):
-        img_name = os.path.join(self.image_folder, self.data[idx])
-        image = Image.open(img_name).convert('RGB')
-        prompt = self.prompt
-        score=self.reward
-
-        if self.transform:
-            image = self.transform(image)
-        batch=(image, torch.tensor(score, dtype=torch.float16), prompt,{},self.data[idx])
-        print(f"item idx {idx}")
-        return batch
 
 def check_size_image1(height,width): 
     if not height:

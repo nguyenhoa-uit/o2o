@@ -13,7 +13,6 @@
 # limitations under the License.
 
 
-
 import requests
 import os
 from dataclasses import dataclass, field
@@ -264,37 +263,39 @@ if __name__ == "__main__":
     print("-------------------------------------------------")
     print(f' args {args}' )
 
-    fn_reward=aesthetic_scorer(args.hf_hub_aesthetic_model_id, args.hf_hub_aesthetic_model_filename)
-
-
-
-    match o2o_config.dataset_index:
-      case 0:
+    # fn_reward=aesthetic_scorer(args.hf_hub_aesthetic_model_id, args.hf_hub_aesthetic_model_filename)
+    dataset=None
+    ix=o2o_config.dataset_index
+    if ix==0:
         dataset=ImageLionArtDatasetHugging(transform=transform,length=5000000,reward=100,vila_threshold=0.63)
-      case 1:
+    if ix==1:
         data_folder='./inputs/An_extremely_beautiful_Asian_girl_v1/'
         dataset=ImageScoreDataset(image_folder=data_folder,transform=transform,prompt="An extremely beautiful Asian girl")
-      case 2:
+    if ix==2:
         dataset=ImageArtPaintingDataset(image_folder='./inputs/selected-vincent-van-gogh',transform=transform,reward=0)
-      case 3:
-        dataset=ImagePickaPicDatasetHugging(image_folder="yuvalkirstain/pickapic_v2",transform=transform,reward=o2o_config.high_reward,length=5000000,vila_threshold=0.65,art_threshold=7.5,art_model=fn_reward)
-      case 6:
+    if ix==3:
+        dataset=ImagePickaPicDatasetHugging(image_folder="yuvalkirstain/pickapic_v2",transform=transform,reward=o2o_config.high_reward,length=5000000,vila_threshold=0.65,art_threshold=7.5,art_model=None)
+    if ix==6:
         #   get only image with vila>5.5
           dataset=ImageLionArtDatasetHugging(transform=transform,length=20000,reward=100,vila_threshold=0.35)         
-      case 7:
+    if ix==7:
         data_folder='./inputs/cellphone_data'
         dataset = ImageScoreDataset(image_folder=data_folder,transform=transform,reward=o2o_config.high_reward,prompt="A man and woman using their cellphones, photograph")
-      case 9:
+    if ix==9:
         data_folder='./inputs/An_extremely_beautiful_Asian_girl_v1/'
         csv_file=data_folder+'data.csv'
         dataset=ImageScoreDatasetCSV(csv_file=csv_file,image_folder=data_folder)
-      case 11:
+   
+    if ix==10:
         dataset= FilteredLaionArt(data_file="hoan17/test_csv_laion",transform=transform,reward=o2o_config.high_reward)
-      case 12:
-        dataset= SelectedPickaPic(transform=transform,reward=o2o_config.high_reward) 
-    
-      case _:
-        dataset= SelectedPickaPic(transform=transform,reward=o2o_config.high_reward) 
+
+    if ix==11:
+        data_folder='./inputs/An_extremely_beautiful_Asian_girl_v1/'
+        dataset=ImageScoreDataset(image_folder=data_folder,transform=transform,prompt="An extremely beautiful Asian girl")
+    if ix==12:
+        dataset= SelectedPickaPic(transform=transform,reward=o2o_config.high_reward)
+    if ix>=12:
+        dataset= SelectedPickaPic(image_folder="./inputs/pick1050/", csv_file="./inputs/pick1050/pick1050.csv",transform=transform,reward=o2o_config.high_reward)      
 
     print("------------------------------------------------------------------------")
     print("Starting loading pipline -----------------------------------------------")
@@ -302,18 +303,21 @@ if __name__ == "__main__":
     
     test_mode=False
   
-
     if test_mode:
-        dataset=ImagePickaPicDatasetHugging(image_folder="yuvalkirstain/pickapic_v2",transform=transform,reward=o2o_config.high_reward,length=10000,vila_threshold=0.60,art_threshold=7.0,art_model=fn_reward)        
-        dataloader_train = DataLoader(dataset, batch_size=1)
+        dataset=ImagePickaPicDatasetHugging(image_folder="yuvalkirstain/pickapic_v2", \
+                                            transform=transform,reward=o2o_config.high_reward,length=10000, \
+                                                vila_threshold=0.78,save_mode=True)        
+        dataloader_train = DataLoader(dataset, batch_size=1,drop_last=True)
 
         dataloader_train_iter=iter(dataloader_train)
-        for epoch in range(50):
+        for epoch in range(1160):
             next(dataloader_train_iter)
-            if epoch%10==0:
-                dataset.save_csv(f"./outputs/art_1100_6vila_7art_{epoch}p4.csv")
+            if epoch%20==0:
+                dataset.save_csv(f"./outputs/art_1000_{epoch}p1.csv")
+
+
         
-    else:
+    if not test_mode:
         pipeline = DefaultO2OStableDiffusionPipeline(
             args.pretrained_model, pretrained_model_revision=args.pretrained_revision, use_lora=args.use_lora
         )
@@ -321,11 +325,9 @@ if __name__ == "__main__":
         if (args.load_folder!=''):
             pipeline.sd_pipeline.load_lora_weights(args.load_folder)
 
-
-    
         print("------------------------------------------------------------------------")
         print("Creating trainer       -----------------------------------------------")
-        
+        fn_reward=None
         trainer = O2OTrainer(
             dataset,
             o2o_config,
@@ -348,10 +350,13 @@ if __name__ == "__main__":
         model_note=o2o_config.huggingface_note
         num_epochs=o2o_config.global_step+o2o_config.num_epochs
         off_batch=o2o_config.offpolicy_sample_batch_size
-        name=f"dataset_index{o2o_config.dataset_index}_{model_note}_offbatch{off_batch}_e{num_epochs}"
+        steps=o2o_config.sample_num_steps
+        Tonline=o2o_config.online_mulitfication_number
+        name=f"dataset_index{o2o_config.dataset_index}_{model_note}_offbatch{off_batch}_T {Tonline}e{num_epochs}-timestep {steps}"
         
         print("------------------------------------------------------------------------")
-        print("Saving local    -----------------------------------------------")
+
+        print(f"Saving local    -------{name}--------------------------------")
 
         trainer.save_pretrained(f"./outputs/{model_note}")
 
