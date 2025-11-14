@@ -2,14 +2,14 @@
 
 Unlike conventional reinforcement learning methods that depend on explicit reward functions, O2O introduces a hybrid training strategy that combines generated images in on-policy learning and real images from datasets in off-policy learning. This approach enables effective alignment of LDMs to human preferences under limited supervision. To our knowledge,  2O is the first method to fine-tune LDMs using RL with a text-to-image dataset. Experimental results show that O2O consistently outperforms both supervised and RL-based ine-tuning in low-data scenarios, achieving superior image quality
 This is an implementation of O2O Off-policy On-policy Optimization
-![O2O](img1.png)
+![O2O](images/img1.png)
 Fig. A: O2O: Off-Policy On-Policy Optimization. A high reward of 1 is assigned to all images from the static dataset for off-policy sampling and a low reward of 0 to all generated images for on-policy sampling without using any reward models
 
 
-![O2O](img2.png)
+![O2O](images/img2.png)
 Fig. B: This figure compares four fine-tuning methods, DPO, SFT, DDPO, and our proposed O2O, applied to SD2.1. 
 
-![O2O](img3.png)
+![O2O](images/img3.png)
 Fig. C: Method comparision
 
 ##  2. Inferance the fine-tuned model :
