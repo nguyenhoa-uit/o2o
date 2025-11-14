@@ -10,10 +10,11 @@ Fig. B: This figure compares four fine-tuning methods, DPO, SFT, DDPO, and our p
 ![O2O](img3.png)
 Fig. C: Method comparision
 
-##  2. Saved model:
+##  2. Inferance the fine-tuned model :
 - Wandb training link:
 https://wandb.ai/hoan-17/Dev/runs/0kq7hjje
-- Inference:
+
+(GG Colab run)
 !pip install trl[diffusers] wandb torchvision -U peft
 
 
@@ -22,20 +23,28 @@ from IPython.display import display, Image
 from diffusers import StableDiffusionPipeline
 
 pipeline = StableDiffusionPipeline.from_pretrained("hoan17/stablediffusion2.1bk")
+
 device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+
 pipeline.vae.to(device, torch.float16)
+
 pipeline.text_encoder.to(device, torch.float16)
+
 pipeline.unet.to(device, torch.float16)
 
 <!-- Base model images -->
 results.images[0].save("./im.png")
+
 display(Image(filename="./im.png",width=256))
 
 <!-- O2O trained model images -->
 
 pipeline.load_lora_weights("hoan17/D500s200x3")
+
 results = pipeline([prompt])
+
 results.images[0].save("./im.png")
+
 display(Image(filename="./im.png",width=256))
 
 
