@@ -34,30 +34,44 @@ class O2OConfig:
     # tracker_project_name: str = "stable_diffusion_training"
     tracker_project_name: str = "Dev"
     """Name of project to use for tracking"""
-    # train_learning_rate: float = 3e-4  
-    train_learning_rate: float = 3e-4
-    """Learning rate."""
+ 
     seed: int = 1  
     """Seed value for random generations"""
     global_step: int=0
     """Global step, using with checkpoint save folder"""
-    high_reward: float=100.00
+    high_reward: float=1.00
     """Reward for a sample picture from dataset """
-    low_reward: float=50.00
+    low_reward: float=0.00
     """Reward for a generated picture from model """
-    show_metrics:bool =False
+    show_metrics:bool =True
     "Image square size"
 
-    resolution:int =128
+    save_start:int=0
+    resolution:int =768
     "Image square size"
-    usage_dataset_size: int=50
+    usage_dataset_size: int=500
     """Number of samples in dataset to train"""
-    dataset_index: int=13
+    dataset_index: int=14
 
-    num_epochs: int =4
+    num_epochs: int =1
+    max_iteration: int=500
+    metric_moving_const: float=0.9
+    """ VilaR early stopping value """
+
+    train_learning_rate: float = 3e-4
+    """Learning rate."""
+
+    lr_warmup_steps=10
+    
+    lr_scheduler: str="constant"
+    """The scheduler type to use. Choose between ["linear", "cosine",
+          "cosine_with_restarts", "polynomial", "constant","constant_with_warmup"""
 
     offpolicy_sample_batch_size: int = 1
     """Batch size for offpolicy from dataset - not larger than sample_batch_size"""
+
+    test_mode: bool =True
+    """Use to update code"""
 
     online_multification_number: int=1
     """Number of online samples for 1 offline samples"""
@@ -65,24 +79,24 @@ class O2OConfig:
     train_batch_size: int =2
     """Batch size (per GPU!) to use for training."""
 
-    train_num_inner_epochs: int = 1
-    """Number of inner epochs per outer epoch."""
+    train_num_inner_iterations: int = 1
+    """Number of inner iterations per outer iteration."""
 
-    sample_num_steps: int = 7
+    sample_num_steps: int = 100
     """Number of sampler inference steps."""
 
-    sample_num_batches_per_epoch: int = 1
-    """Number of batches to sample per epoch."""
+    sample_num_batches_per_iteration: int = 1
+    """Number of batches to sample per iteration."""
     # resume_from: Optional[str] = "./outputs/checkpoint/checkpoints/checkpoint_20"
 
     resume_from: Optional[str] = "./outputs/checkpoints/checkpoint_0"
     resume_from: Optional[str] = ""
     """== checkpoin from // Resume training from a checkpoint."""
 
-    save_freq: int = 500
-    """Number of epochs between saving model checkpoints."""
+    save_freq: int = 100
+    """Number of iterations between saving model checkpoints."""
 
-    huggingface_note: str = "Testlap"
+    huggingface_note: str = "Default"
     """Save model note."""
 
 
@@ -112,7 +126,7 @@ class O2OConfig:
 
     train_cfg: bool = True
     """Whether or not to use classifier-free guidance during training."""
-    train_adv_clip_max: float = 5
+    train_adv_clip_max: float = 5.0
     """Clip advantages to the range."""
     train_clip_range: float = 1e-4
     """The PPO clip range."""

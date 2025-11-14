@@ -36,6 +36,7 @@ from torchvision.transforms import functional as F
 from codes.utils import predict_vila_image
 import tensorflow as tf
 import tensorflow_hub as hub
+from diffusers.optimization import get_scheduler
 
 logger = get_logger(__name__)
 
@@ -79,18 +80,14 @@ class O2OTrainer(BaseTrainer):
 
     def __init__(
         self,
-
-        # Thêm
         dataset: Dataset,
         config: O2OConfig,
-        reward_function: Callable[[torch.Tensor, Tuple[str], Tuple[Any]], torch.Tensor],
         sd_pipeline: O2OStableDiffusionPipeline,
         image_samples_hook: Optional[Callable[[Any, Any, Any], Any]] = None,
     ):
         if image_samples_hook is None:
             warn("No image_samples_hook provided; no images will be logged")
 
-        self.reward_fn = reward_function
         self.config = config
         self.image_samples_callback = image_samples_hook
 
@@ -174,6 +171,8 @@ class O2OTrainer(BaseTrainer):
         self.sd_pipeline.vae.to(self.accelerator.device, dtype=inference_dtype)
         self.sd_pipeline.text_encoder.to(self.accelerator.device, dtype=inference_dtype)
         self.sd_pipeline.unet.to(self.accelerator.device, dtype=inference_dtype)
+        # if self.config.kl_weight!=0:
+        #   self.sd_pipeline.unet_copy.to(self.accelerator.device, dtype=inference_dtype)
 
         trainable_layers = self.sd_pipeline.get_trainable_layers()
         self.accelerator.register_save_state_pre_hook(self._save_model_hook)
@@ -186,6 +185,12 @@ class O2OTrainer(BaseTrainer):
 
         self.optimizer = self._setup_optimizer(
             trainable_layers.parameters() if not isinstance(trainable_layers, list) else trainable_layers
+        )
+        self.lr_scheduler = get_scheduler(
+        self.config.lr_scheduler,
+        optimizer=self.optimizer,
+        num_warmup_steps=int(self.config.lr_warmup_steps /self.config.train_gradient_accumulation_steps),
+        num_training_steps=int(self.config.max_iteration /self.config.train_gradient_accumulation_steps),
         )
 
         self.neg_prompt_embed = self.sd_pipeline.text_encoder(
@@ -209,10 +214,11 @@ class O2OTrainer(BaseTrainer):
         self.autocast = self.sd_pipeline.autocast or self.accelerator.autocast
 
         if hasattr(self.sd_pipeline, "use_lora") and self.sd_pipeline.use_lora:
-            unet, self.optimizer = self.accelerator.prepare(trainable_layers, self.optimizer)
+            unet, self.optimizer,self.lr_scheduler = self.accelerator.prepare(trainable_layers, self.optimizer,self.lr_scheduler)
             self.trainable_layers = list(filter(lambda p: p.requires_grad, unet.parameters()))
         else:
             self.trainable_layers, self.optimizer = self.accelerator.prepare(trainable_layers, self.optimizer)
+            self.unet_copy=None
 
         if self.config.async_reward_computation:
             self.executor = futures.ThreadPoolExecutor(max_workers=config.max_workers)
@@ -220,16 +226,19 @@ class O2OTrainer(BaseTrainer):
         if config.resume_from:
             logger.info(f"Resuming from {config.resume_from}")
             self.accelerator.load_state(config.resume_from)
-            self.first_epoch = int(config.resume_from.split("_")[-1]) + 1
+            self.first_iteration = int(config.resume_from.split("_")[-1]) + 1
         else:
-            self.first_epoch = 0
+            self.first_iteration = 0
 
 
         if self.config.show_metrics :
             self.vila_model=hub.load('https://tfhub.dev/google/vila/image/1')
         else:
             self.vila_model=None
-
+        self.total_iteration=-1
+        self.vila_score_moving=0
+        # not use
+        self.stopping_count=0
 
 
     def train(self, epochs: Optional[int] = None):
@@ -240,32 +249,41 @@ class O2OTrainer(BaseTrainer):
         if epochs is None:
             epochs = self.config.num_epochs
         
-        for epoch in range(self.first_epoch, epochs):
+        for epoch in range(epochs):
             print("\n")
             print("------------------------------------------------------------------------")
             print(f"Starting epoch {epoch} ----------------------------------------------- \n")
             global_step = self.step(epoch, global_step)
 
+
     def step(self, epoch: int, global_step: int):
         batches=[]
-        for loop, batch in enumerate(self.dataloader):
-            print(f"---------Starting loop {loop} ---------------------------------------- \n")
-            if len(batches)<self.config.sample_num_batches_per_epoch:
-                batches.append(batch)
+        for iteration, batch in enumerate(self.dataloader):
+            # if not batch[0]:
+            #   continue
+            print(f"---------Starting iteration {iteration} ---------------------------------------- \n")
+            batches.append(batch)
+            if len(batches)<self.config.sample_num_batches_per_iteration:   
                 continue
             else:
+                self.total_iteration+=1
+                self.stopping_count+=1
+
+                if self.config.max_iteration<self.total_iteration:
+                    break
+                    
                 samples, prompt_image_data,vila_score = self._generate_samples_both(batches,
                     offpolicy_batch_size=self.config.offpolicy_sample_batch_size,
                 )
 
                 rewards=tuple([i['rewards'] for i in samples])
-                rewards_metadata=tuple([{} for i in range(self.config.sample_num_batches_per_epoch)])
+                rewards_metadata=tuple([{} for i in range(self.config.sample_num_batches_per_iteration)])
                 samples = {k: torch.cat([s[k] for s in samples]) for k in samples[0].keys()}
                 # rewards_log about art function.
                 print(rewards)
+                print()
 
                 
-                # prompt_image_data = iteration x bachsize
                 images, prompts, _ = prompt_image_data[-1]
 
                 for i, image_data in enumerate(prompt_image_data):
@@ -273,18 +291,19 @@ class O2OTrainer(BaseTrainer):
 
                 if self.image_samples_callback is not None:
                     self.image_samples_callback(prompt_image_data, global_step, self.accelerator.trackers[0],caption='main')
+           
+                rewards = self.accelerator.gather(torch.cat(rewards)).cpu().numpy().astype(float)
 
-                rewards = torch.cat(rewards)
-                rewards = self.accelerator.gather(rewards).cpu().numpy()
 
-
-                if self.config.per_prompt_stat_tracking:
-                    prompt_ids = self.accelerator.gather(samples["prompt_ids"]).cpu().numpy()
-                    prompts = self.sd_pipeline.tokenizer.batch_decode(prompt_ids, skip_special_tokens=True)
-                    advantages = self.stat_tracker.update(prompts, rewards)
-                else:
-                    advantages = (rewards - rewards.mean()) / (rewards.std() + 1e-8)
-
+                # if self.config.per_prompt_stat_tracking:
+                #     prompt_ids = self.accelerator.gather(samples["prompt_ids"]).cpu().numpy()
+                #     prompts = self.sd_pipeline.tokenizer.batch_decode(prompt_ids, skip_special_tokens=True)
+                #     advantages = self.stat_tracker.update(prompts, rewards)
+                # else:
+                advantages = (rewards - rewards.mean()) / (rewards.std() + 1e-8)
+                print(rewards.mean())
+                print(rewards.std())
+                print(f"advantages {advantages}")
                 # ungather advantages;  keep the entries corresponding to the samples on this process
                 samples["advantages"] = (
                     torch.as_tensor(advantages)
@@ -296,8 +315,8 @@ class O2OTrainer(BaseTrainer):
 
                 total_batch_size, num_timesteps = samples["timesteps"].shape
 
-                for inner_epoch in range(self.config.train_num_inner_epochs):
-                    print(f'------****************Inner epoch {inner_epoch}')
+                for inner_iteration in range(self.config.train_num_inner_iterations):
+                    print(f'------****************Inner iteration {inner_iteration}')
 
                     # shuffle samples along batch dimension
 
@@ -327,51 +346,168 @@ class O2OTrainer(BaseTrainer):
 
 
                     self.sd_pipeline.unet.train()
-                    global_step = self._train_batched_samples(inner_epoch, epoch, global_step, 
+                    global_step = self._train_batched_samples(inner_iteration, iteration, global_step, 
                     samples_batched)
 
 
-                    # ensure optimization step at the end of the inner epoch
-                    if not self.accelerator.sync_gradients:
-                        print("not self.accelerator.sync_gradients")
-                    else:
-                        print(" self.accelerator.sync_gradients")
 
                     if not self.accelerator.sync_gradients:
 
                         raise ValueError(
                             "Optimization step should have been performed by this point. Please check calculated gradient accumulation settings."
                         )
-        
-                self.accelerator.log(
-                    {
-                        "epoch": epoch,
-                        "reward_mean": rewards.mean(),
-                        "reward_std": rewards.std(),
-                        "vila_score": vila_score,
 
-                    },
-                    step=global_step,
-                )
+                
                 # Bị lỗi 
-                batches=[]
+            batches=[]
+            print(f" --------------------Vila score {vila_score}")
+            if self.vila_score_moving==0: 
+                self.vila_score_moving=vila_score
+            else:
+                self.vila_score_moving=self.vila_score_moving*self.config.metric_moving_const+vila_score*(1-self.config.metric_moving_const)
+     
+            self.accelerator.log(
+                {
+                    "iteration": iteration,
+                    "reward_mean": rewards.mean(),
+                    "reward_std": rewards.std(),
+                    "vila_score_moving": self.vila_score_moving,
+                    "vila_score_raw": vila_score,
 
-        try:
-            if epoch != 0 and epoch % self.config.save_freq == 0 and self.accelerator.is_main_process:
-                self.accelerator.save_state()
-                print(f"********************** state saved {epoch}")
-        except:
-            print('checkpoint saving error')
+                },
+                step=global_step,
+            )
+
+           
+
+            try:
+                # if self.total_iteration != 0 and self.total_iteration % self.config.save_freq == 0 and self.accelerator.is_main_process:
+                    # self.accelerator.save_state()
+                if self.total_iteration != 0 and self.total_iteration>=self.config.save_start and self.total_iteration % self.config.save_freq == 0 and self.accelerator.is_main_process:
+                    print(f"*********push_to_hub************* state saved {iteration}")
+                    self.push_to_hub(f"saving_{self.config.huggingface_note}_{self.total_iteration}")
+            except:
+                print('hub saving error')
+                
         return global_step
+    
+    def _train_batched_samples(self, inner_iteration, iteration, global_step, batched_samples):
+        """
+        Train on a batch of samples. Main training segment
 
-    def _generate_samples_both(self, batches,offpolicy_batch_size):
+        Args:
+            inner_iteration (int): The current inner iteration
+            iteration (int): The current iteration
+            global_step (int): The current global step
+            batched_samples (List[Dict[str, torch.Tensor]]): The batched samples to train on
+
+        Side Effects:
+            - Model weights are updated
+            - Logs the statistics to the accelerator trackers.
+
+        Returns:
+            global_step (int): The updated global step
+        """
+        info = defaultdict(list)
+        pr=False
+        for _i, sample in enumerate(batched_samples):
+            print(f"train batch {_i}")
+            if self.config.train_cfg:
+                # concat negative prompts to sample prompts to avoid two forward passes
+                embeds = torch.cat([sample["negative_prompt_embeds"], sample["prompt_embeds"]])
+            else:
+                embeds = sample["prompt_embeds"]
+
+            for j in range(self.num_train_timesteps):
+        
+
+                with self.accelerator.accumulate(self.sd_pipeline.unet):
+                    loss, clipfrac = self.calculate_loss(
+                        sample["latents"][:, j],
+                        sample["timesteps"][:, j],
+                        sample["next_latents"][:, j],
+                        sample["log_probs"][:, j],
+                        sample["advantages"],
+                        embeds,
+                    )
+                    info["clipfrac"].append(clipfrac)
+                    info["loss"].append(loss)
+
+
+                    self.accelerator.backward(loss)
+                    if self.accelerator.sync_gradients:
+                        self.accelerator.clip_grad_norm_(
+                            self.trainable_layers.parameters()
+                            if not isinstance(self.trainable_layers, list)
+                            else self.trainable_layers,
+                            self.config.train_max_grad_norm,
+                        )
+            
+                    self.optimizer.step()
+                    self.optimizer.zero_grad()
+                    self.lr_scheduler.step()
+
+                # Checks if the accelerator has performed an optimization step behind the scenes
+                if self.accelerator.sync_gradients:
+                    # log training-related stuff
+                    info = {k: torch.mean(torch.stack(v)) for k, v in info.items()}
+                    info = self.accelerator.reduce(info, reduction="mean")
+                    info.update({"iteration": iteration, "inner_iteration": inner_iteration})
+                    self.accelerator.log(info, step=global_step)
+                    global_step += 1
+                    info = defaultdict(list)
+                    print(f"accelerator sync_gradients ")
+        return global_step
+    
+    def _generate_samples_both(self, batches, offpolicy_batch_size):
+        off_samples, off_prompt_image_pairs, batch_prompts = self._generate_samples_offline(
+            batch_size=offpolicy_batch_size,
+            batches=batches
+        )
+        
+        # Replicate batch prompts for each sample batch
+        batches_prompts = [batch_prompts] * self.config.sample_num_batches_per_iteration
+
+        on_samples, on_prompt_image_pairs = self._generate_samples_onpolicy(
+            batch_size=self.config.online_multification_number * self.config.offpolicy_sample_batch_size,
+            batches_prompts=batches_prompts,
+        )
+
+        vila_score = 0
+        if self.config.show_metrics:
+            vila_list = [sample["vila_avg"] for sample in on_samples]
+            vila_score = float(sum(vila_list) / len(vila_list))
+
+        num_samples = len(off_samples)
+
+        # Concatenate off-policy and on-policy sample tensors for each key
+        off_samples = [
+            {k: torch.cat((off_samples[i][k], on_samples[i][k])) for k in off_samples[0].keys()}
+            for i in range(num_samples)
+        ]
+
+        # Merge prompt-image pairs by concatenating tensors and extending tuples
+        for i, (off_pair, on_pair) in enumerate(zip(off_prompt_image_pairs, on_prompt_image_pairs)):
+            # Concatenate tensors (index 0)
+            off_pair[0] = torch.cat((off_pair[0], on_pair[0]))
+            
+            # Extend the tuples (indices 1 and 2)
+            for idx in (1, 2):
+                extended_list = list(off_pair[idx])
+                extended_list.extend(on_pair[idx])
+                off_pair[idx] = tuple(extended_list)
+
+        return off_samples, off_prompt_image_pairs, vila_score
+
+
+    def _generate_samples_both_bk(self, batches,offpolicy_batch_size):
 
         off_samples, off_prompt_image_pairs,batch_prompts=self._generate_samples_offline(batch_size=offpolicy_batch_size,
         batches=batches
         ) 
     
         # prompts=[batch_prompts[0] for i in range(onpolicy_batch_size)]
-        batches_prompts=[batch_prompts for i in range(self.config.sample_num_batches_per_epoch)]
+        batches_prompts=[batch_prompts for i in range(self.config.sample_num_batches_per_iteration)]
 
         on_samples, on_prompt_image_pairs= self._generate_samples_onpolicy(
         batch_size=self.config.online_multification_number*self.config.offpolicy_sample_batch_size,
@@ -441,7 +577,8 @@ class O2OTrainer(BaseTrainer):
                     # prompt_image_data = iteration x bachsize
 
             if self.config.show_metrics:
-                vila_list=[predict_vila_image(F.to_pil_image(img, mode=None),self.vila_model) for img in images]
+
+                vila_list=[predict_vila_image(F.to_pil_image(img,mode=None),self.vila_model) for img in images]
                 vila_avg=float(sum(vila_list) / len(vila_list))
             else:
                 vila_avg=float(1)
@@ -608,7 +745,7 @@ class O2OTrainer(BaseTrainer):
                     embeds,
                 ).sample
             # compute the log prob of next_latents given latents under the current model
-
+               
             scheduler_step_output = self.sd_pipeline.scheduler_step(
                 noise_pred,
                 timesteps,
@@ -627,21 +764,17 @@ class O2OTrainer(BaseTrainer):
         )
 
         ratio = torch.exp(log_prob - log_probs)
-        # print(f'loss fn   ---- ratio= {ratio}')
-        print(f'loss fn   ---- log_prob= {log_prob}  log_probs{log_probs} ')
-
-        # print(f'timestep   ---- = {timesteps}')
-        # print(f'advantages   ---- = {advantages}')
-
-
+        pp=torch.rand(1)[0]
+        if float(pp)>0.98:      
+          print(f'loss fn   ---- ratio= {ratio}')
+          print(f'loss fn   ---- log_prob= {log_prob}  log_probs{log_probs} ')
+          print(f'timestep   ---- = {timesteps}')
+          print(f'advantages   ---- = {advantages}')
 
         loss = self.loss(advantages, self.config.train_clip_range, ratio)
-
-        approx_kl = 0.5 * torch.mean((log_prob - log_probs) ** 2)
-
         clipfrac = torch.mean((torch.abs(ratio - 1.0) > self.config.train_clip_range).float())
 
-        return loss, approx_kl, clipfrac
+        return loss, clipfrac
 
     def loss(
         self,
@@ -672,6 +805,13 @@ class O2OTrainer(BaseTrainer):
             weight_decay=self.config.train_adam_weight_decay,
             eps=self.config.train_adam_epsilon,
         )
+        # return optimizer_cls(
+        #     trainable_layers_parameters,
+        #     lr=self.get_lr_scheduler,
+        #     betas=(self.config.train_adam_beta1, self.config.train_adam_beta2),
+        #     weight_decay=self.config.train_adam_weight_decay,
+        #     eps=self.config.train_adam_epsilon,
+        # )
 
     def _save_model_hook(self, models, weights, output_dir):
         self.sd_pipeline.save_checkpoint(models, weights, output_dir)
@@ -681,79 +821,12 @@ class O2OTrainer(BaseTrainer):
         self.sd_pipeline.load_checkpoint(models, input_dir)
         models.pop()  # ensures that accelerate doesn't try to handle loading of the model
 
-    def _train_batched_samples(self, inner_epoch, epoch, global_step, batched_samples):
-        """
-        Train on a batch of samples. Main training segment
 
-        Args:
-            inner_epoch (int): The current inner epoch
-            epoch (int): The current epoch
-            global_step (int): The current global step
-            batched_samples (List[Dict[str, torch.Tensor]]): The batched samples to train on
-
-        Side Effects:
-            - Model weights are updated
-            - Logs the statistics to the accelerator trackers.
-
-        Returns:
-            global_step (int): The updated global step
-        """
-        info = defaultdict(list)
-        pr=False
-        for _i, sample in enumerate(batched_samples):
-            if self.config.train_cfg:
-                # concat negative prompts to sample prompts to avoid two forward passes
-                embeds = torch.cat([sample["negative_prompt_embeds"], sample["prompt_embeds"]])
-            else:
-                embeds = sample["prompt_embeds"]
-
-            for j in range(self.num_train_timesteps):
-        
-
-                with self.accelerator.accumulate(self.sd_pipeline.unet):
-                    loss, approx_kl, clipfrac = self.calculate_loss(
-                        sample["latents"][:, j],
-                        sample["timesteps"][:, j],
-                        sample["next_latents"][:, j],
-                        sample["log_probs"][:, j],
-                        sample["advantages"],
-                        embeds,
-                    )
-                    info["approx_kl"].append(approx_kl)
-                    info["clipfrac"].append(clipfrac)
-                    info["loss"].append(loss)
-
-                    self.accelerator.backward(loss)
-                    if self.accelerator.sync_gradients:
-                        self.accelerator.clip_grad_norm_(
-                            self.trainable_layers.parameters()
-                            if not isinstance(self.trainable_layers, list)
-                            else self.trainable_layers,
-                            self.config.train_max_grad_norm,
-                        )
-                    try:
-                      self.optimizer.step()
-                    except:
-                      print('Error self.optimizer.step()')
-                    finally:
-                      self.optimizer.zero_grad()
-
-                # Checks if the accelerator has performed an optimization step behind the scenes
-                if self.accelerator.sync_gradients:
-                    # log training-related stuff
-                    info = {k: torch.mean(torch.stack(v)) for k, v in info.items()}
-                    info = self.accelerator.reduce(info, reduction="mean")
-                    info.update({"epoch": epoch, "inner_epoch": inner_epoch})
-                    self.accelerator.log(info, step=global_step)
-                    global_step += 1
-                    info = defaultdict(list)
-        return global_step
-    
 
     def _config_check(self) -> Tuple[bool, str]:
         sample_batch_size=self.config.offpolicy_sample_batch_size*(1+self.config.online_multification_number)
-        samples_per_epoch = (
-            sample_batch_size * self.accelerator.num_processes * self.config.sample_num_batches_per_epoch
+        samples_per_iteration = (
+            sample_batch_size * self.accelerator.num_processes * self.config.sample_num_batches_per_iteration
         )
         total_train_batch_size = (
             self.config.train_batch_size
@@ -771,10 +844,10 @@ class O2OTrainer(BaseTrainer):
                 False,
                 f"Sample batch size ({sample_batch_size}) must be divisible by the train batch size ({self.config.train_batch_size})",
             )
-        # if not samples_per_epoch % total_train_batch_size == 0:
+        # if not samples_per_iteration % total_train_batch_size == 0:
         #     return (
         #         False,
-        #         f"Number of samples per epoch ({samples_per_epoch}) must be divisible by the total train batch size ({total_train_batch_size})",
+        #         f"Number of samples per iteration ({samples_per_iteration}) must be divisible by the total train batch size ({total_train_batch_size})",
         #     )
         return True, ""
 
