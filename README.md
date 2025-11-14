@@ -73,7 +73,11 @@ display(Image(filename="./im.png",width=256))
     --pretrained_model="stabilityai/stable-diffusion-2-1" \
     --huggingface_note="Saving" \
 '''
-##  4. Base code:
+##  4. Dataset:
+
+The dataset is available with code in foler inputs. It is a filtered 550-image subset of Pick a Pic V2 (https://huggingface.co/datasets/Min-Jaewon/pickapic-v2)
+
+##  5. Base code:
 '''
  This code builds on top of DDPO trl: https://github.com/huggingface/trl/tree/v0.23.1/trl/trainer
  
