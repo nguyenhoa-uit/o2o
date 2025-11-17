@@ -1,27 +1,28 @@
-##  1. O2O: Fine-Tuning Diffusion Models with Reinforcement Learning Using a Hybrid of Generated and Real Images
+## 1. O2O: Fine-Tuning Diffusion Models with Reinforcement Learning Using a Hybrid of Generated and Real Images
 
-Unlike conventional reinforcement learning methods that depend on explicit reward functions, O2O introduces a hybrid training strategy that combines generated images in on-policy learning and real images from datasets in off-policy learning. This approach enables effective alignment of LDMs to human preferences under limited supervision. To our knowledge,  2O is the first method to fine-tune LDMs using RL with a text-to-image dataset. Experimental results show that O2O consistently outperforms both supervised and RL-based ine-tuning in low-data scenarios, achieving superior image quality
-The O2O paper is accepted by RIVF 2025 (https://rivf2025.org/) - 2025 RIVF International Conference on Computing and Communication Technologies
+Unlike conventional reinforcement learning methods that depend on explicit reward functions, O2O introduces a hybrid training strategy that combines generated images in on-policy learning and real images from datasets in off-policy learning. This approach enables effective alignment of LDMs to human preferences under limited supervision. To our knowledge, 2O is the first method to fine-tune LDMs using RL with a text-to-image dataset. Experimental results show that O2O consistently outperforms both supervised and RL-based ine-tuning in low-data scenarios, achieving superior image quality.
 
+The O2O paper is accepted by RIVF 2025 (https://rivf2025.org/) - 2025 RIVF International Conference on Computing and Communication Technologies.
 
-This is an implementation of O2O Off-policy On-policy Optimization
+This is an implementation of O2O Off-policy On-policy Optimization.
+
 ![O2O](images/img1.png)
-Fig. A: O2O: Off-Policy On-Policy Optimization. A high reward of 1 is assigned to all images from the static dataset for off-policy sampling and a low reward of 0 to all generated images for on-policy sampling without using any reward models
-
+Fig. A: O2O: Off-Policy On-Policy Optimization. A high reward of 1 is assigned to all images from the static dataset for off-policy sampling and a low reward of 0 to all generated images for on-policy sampling without using any reward models.
 
 ![O2O](images/img2.png)
-Fig. B: This figure compares four fine-tuning methods, DPO, SFT, DDPO, and our proposed O2O, applied to SD2.1. 
+Fig. B: This figure compares four fine-tuning methods, DPO, SFT, DDPO, and our proposed O2O, applied to SD2.1.
 
 ![O2O](images/img3.png)
-Fig. C: Method comparision
+Fig. C: Method comparision.
 
-##  2. Inferance the fine-tuned model :
+
+## 2. Inferance the fine-tuned model :
+
 - Wandb training link:
 https://wandb.ai/hoan-17/Dev/runs/0kq7hjje
 
 (GG Colab run)
 !pip install trl[diffusers] wandb torchvision -U peft
-
 
 import torch
 from IPython.display import display, Image
@@ -32,60 +33,59 @@ pipeline = StableDiffusionPipeline.from_pretrained("hoan17/stablediffusion2.1bk"
 device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
 pipeline.vae.to(device, torch.float16)
-
 pipeline.text_encoder.to(device, torch.float16)
-
 pipeline.unet.to(device, torch.float16)
 
 <!-- Base model images -->
 results.images[0].save("./im.png")
-
 display(Image(filename="./im.png",width=256))
 
 <!-- O2O trained model images -->
-
 pipeline.load_lora_weights("hoan17/D500s200x3")
 
 results = pipeline([prompt])
-
 results.images[0].save("./im.png")
-
 display(Image(filename="./im.png",width=256))
 
 
-##  3. Training:
-''' 
+## 3. Training:
+
+'''
 - Log in wandb and huggingface
 !pip install trl[diffusers] wandb torchvision -U peft
 
-(low GPU Memory)
+
+%cd /content/drive/MyDrive/AllShare/Thesis_UIT/test_git/o2o
 !python o2o.py \
-    --num_epochs=1 \
-    --max_loop=500 \
-    --log_with="wandb" \
-    --pretrained_model="stabilityai/stable-diffusion-2-1" \
-    --huggingface_note="Saving" \
+--num_epochs=1 \
+--save_start=140 \
+--max_iteration=170 \
+--save_freq=10 \
+--offpolicy_sample_batch_size=3 \
+--train_batch_size=6 \
+--sample_num_steps=100 \
+--log_with="wandb" \
+--pretrained_model="hoan17/stablediffusion2.1bk" \
+--huggingface_note="Test"
 
-(high GPU Memory)
-!python o2o.py \
-    --num_epochs=1 \
-    --max_loop=500 \
-    --offpolicy_sample_batch_size=3\
-    --train_batch_size=6  \
-    --log_with="wandb" \
-    --pretrained_model="stabilityai/stable-diffusion-2-1" \
-    --huggingface_note="Saving" \
-'''
-##  4. Dataset:
-
-The dataset is available with code in foler inputs. It is a filtered 550-image subset of Pick a Pic V2 (https://huggingface.co/datasets/Min-Jaewon/pickapic-v2)
-
-##  5. Base code:
-'''
- This code builds on top of DDPO trl: https://github.com/huggingface/trl/tree/v0.23.1/trl/trainer
- 
-🤗 `trl` provides a [`DDPOTrainer` class](https://huggingface.co/docs/trl/ddpo_trainer) which lets you fine-tune Stable Diffusion on different reward functions using DDPO. 
-The integration supports LoRA, too.  You can check out the [supplementary blog post](https://huggingface.co/blog/trl-ddpo) for additional guidance. 
 '''
 
 
+## 4. Dataset:
+
+The dataset is available with code in foler inputs.  
+It is a filtered 550-image subset of Pick a Pic V2:  
+https://huggingface.co/datasets/Min-Jaewon/pickapic-v2
+
+
+## 5. Base code:
+
+'''
+This code builds on top of DDPO trl:
+https://github.com/huggingface/trl/tree/v0.23.1/trl/trainer
+
+🤗 `trl` provides a `DDPOTrainer` class which lets you fine-tune Stable Diffusion on different reward functions using DDPO.
+The integration supports LoRA, too.  
+You can check out the supplementary blog post:
+https://huggingface.co/blog/trl-ddpo
+'''
