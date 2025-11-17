@@ -24,6 +24,7 @@ https://wandb.ai/hoan-17/Dev/runs/0kq7hjje
 (GG Colab run)
 ```bash
 !pip install trl[diffusers] wandb torchvision -U peft
+
 ```
 
 
@@ -51,6 +52,7 @@ pipeline.load_lora_weights("hoan17/D500s200x3")
 results = pipeline([prompt])
 results.images[0].save("./im.png")
 display(Image(filename="./im.png",width=256))
+
 ```
 
 ## 3. Training:
@@ -76,7 +78,7 @@ display(Image(filename="./im.png",width=256))
 --pretrained_model="hoan17/stablediffusion2.1bk" \
 --huggingface_note="Test"
 
-'''
+```
 
 
 ## 4. Dataset:
