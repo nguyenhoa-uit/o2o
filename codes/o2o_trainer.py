@@ -362,7 +362,7 @@ class O2OTrainer(BaseTrainer):
             batches=[]
             print(f" --------------------Vila score {vila_score}")
             if self.vila_score_moving==0: 
-                self.vila_score_moving=vila_score
+                self.vila_score_moving=vila_score*self.config.metric_moving_const
             else:
                 self.vila_score_moving=self.vila_score_moving*self.config.metric_moving_const+vila_score*(1-self.config.metric_moving_const)
      
@@ -547,7 +547,6 @@ class O2OTrainer(BaseTrainer):
 
         for batch_prompts in batches_prompts:
             prompt_metadata = tuple([{} for _ in range(batch_size)])
-            print(f"prompts ---- to generate offine {batch_prompts}")
 
             prompt_ids = self.sd_pipeline.tokenizer(
                 batch_prompts,
@@ -678,7 +677,6 @@ class O2OTrainer(BaseTrainer):
             # scores_offline=torch.as_tensor(scores_offline).unsqueeze(dim=1).repeat(1,self.config.sample_num_steps)
             scores_offline=torch.as_tensor(scores_offline).unsqueeze(dim=1)
 
-            print(f'******  o2otrainer timesteps shape {timesteps.shape}')
            
            
             # latents phải từ noise đến ảnh
@@ -694,8 +692,8 @@ class O2OTrainer(BaseTrainer):
                     "rewards": scores_offline,
                 }
             )
-            print(f'*********** img_name {img_name}')
-            print(f'*********** samples[-1]["rewards"][:][:2]{samples[-1]["rewards"][:][:2]}')
+
+
 
 
             prompt_image_pairs.append([images, batch_prompts, prompt_metadata])
@@ -765,11 +763,6 @@ class O2OTrainer(BaseTrainer):
 
         ratio = torch.exp(log_prob - log_probs)
         pp=torch.rand(1)[0]
-        if float(pp)>0.98:      
-          print(f'loss fn   ---- ratio= {ratio}')
-          print(f'loss fn   ---- log_prob= {log_prob}  log_probs{log_probs} ')
-          print(f'timestep   ---- = {timesteps}')
-          print(f'advantages   ---- = {advantages}')
 
         loss = self.loss(advantages, self.config.train_clip_range, ratio)
         clipfrac = torch.mean((torch.abs(ratio - 1.0) > self.config.train_clip_range).float())
